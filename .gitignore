@@ -1,4 +1,5 @@
 __pycache__/
 *.pyc
 .DS_Store
+*.h5
 011_test/
