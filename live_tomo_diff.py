@@ -16,6 +16,7 @@ POLL_INTERVAL = 2.0
 IMAGE_KEY_PROJECTION = 0
 IMAGE_KEY_FLAT = 1
 IMAGE_KEY_DARK = 2
+DEFAULT_FIGSIZE = (14, 8)
 
 
 def parse_args() -> argparse.Namespace:
@@ -439,7 +440,7 @@ def main() -> int:
     diff_image = second_image - first_image
 
     plt.ion()
-    fig, ax = plt.subplots()
+    fig, ax = plt.subplots(figsize=DEFAULT_FIGSIZE)
     image_artist = ax.imshow(diff_image, cmap="gray")
     colorbar = fig.colorbar(image_artist, ax=ax)
     colorbar.set_label("Difference")
