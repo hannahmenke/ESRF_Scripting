@@ -393,9 +393,13 @@ def main() -> int:
     comparison_path = (
         Path(args.comparison_path).expanduser()
         if args.comparison_path is not None
-        else prompt_path(
-            "Comparison dataset/scan path (leave empty to auto-follow latest tomo): ",
-            allow_empty=True,
+        else (
+            None
+            if args.reference_path is not None
+            else prompt_path(
+                "Comparison dataset/scan path (leave empty to auto-follow latest tomo): ",
+                allow_empty=True,
+            )
         )
     )
     projection_index = (
