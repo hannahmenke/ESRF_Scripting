@@ -60,6 +60,16 @@ def parse_args() -> argparse.Namespace:
         help="Seconds between checks for a newer tomography dataset.",
     )
     parser.add_argument(
+        "--colormap",
+        default="gray",
+        help="Matplotlib colormap for the difference image. Default: gray.",
+    )
+    parser.add_argument(
+        "--hot-cold",
+        action="store_true",
+        help="Use a diverging hot/cold colormap for the difference image.",
+    )
+    parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         default="INFO",
@@ -449,6 +459,8 @@ def main() -> int:
     if projection_index < 0:
         LOGGER.error("Projection index must be >= 0.")
         return 1
+    if args.hot_cold:
+        args.colormap = "coolwarm"
 
     try:
         reference_dataset_root, reference_scan = resolve_input_target(reference_path)
@@ -470,7 +482,7 @@ def main() -> int:
 
     plt.ion()
     fig, ax = plt.subplots(figsize=DEFAULT_FIGSIZE)
-    image_artist = ax.imshow(diff_image, cmap="gray")
+    image_artist = ax.imshow(diff_image, cmap=args.colormap)
     colorbar = fig.colorbar(image_artist, ax=ax)
     colorbar.set_label("Difference")
     ax.set_xlabel("X")
@@ -485,6 +497,7 @@ def main() -> int:
     LOGGER.info("Comparison projections available: %s", second_count)
     LOGGER.info("Using projection index: %s", projection_index)
     LOGGER.info("Position mode: %s", position_mode)
+    LOGGER.info("Colormap: %s", args.colormap)
     if auto_follow:
         LOGGER.info("Watching collection for newer tomography datasets: %s", reference_dataset_root.parent)
 
