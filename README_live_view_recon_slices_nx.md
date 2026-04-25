@@ -32,7 +32,8 @@ python3 live_view_recon_slices_nx.py \
   --reference-path 0_39/039_Estaillades_WW_Drainage_first_position \
   --axis 0 \
   --num-slices 4 \
-  --position-mode same
+  --position-mode same \
+  --downsample 2
 ```
 
 Watch a specific reconstruction file directly:
@@ -61,6 +62,15 @@ python3 live_view_recon_slices_nx.py \
   --orthogonal
 ```
 
+Use the fast orthogonal mode:
+
+```bash
+python3 live_view_recon_slices_nx.py \
+  --reference-path 0_39/039_Estaillades_WW_Drainage_first_position_0002 \
+  --orthogonal \
+  --fast
+```
+
 Show orthogonal slices through a chosen point:
 
 ```bash
@@ -87,3 +97,5 @@ python3 live_view_recon_slices_nx.py \
 - `--orthogonal` shows one XY/XZ/YZ triplet through the volume center.
 - `--orthogonal-center a,b,c` selects the orthogonal intersection point as axis0,axis1,axis2.
 - `--difference-path` adds a second panel set showing `current - baseline`.
+- `--downsample` reduces the displayed slice size at read time and is the easiest way to speed up large recon views.
+- `--fast` forces `--downsample 2` and, in orthogonal mode, shows only `XY` and `XZ`.

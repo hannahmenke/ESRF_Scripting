@@ -6,6 +6,7 @@ import argparse
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import h5py
 import matplotlib.pyplot as plt
@@ -53,6 +54,12 @@ def parse_args() -> argparse.Namespace:
         default=POLL_INTERVAL,
         help="Seconds between checks for a newer tomography dataset.",
     )
+    parser.add_argument(
+        "--downsample",
+        type=int,
+        default=1,
+        help="Display downsampling factor. 1 keeps full resolution. Default: 1.",
+    )
     return parser.parse_args()
 
 
@@ -96,6 +103,12 @@ def read_dataset(h5_file: h5py.File, dataset_path: str) -> h5py.Dataset:
     if not isinstance(dataset, h5py.Dataset):
         raise RuntimeError(f"{dataset_path} is not a dataset")
     return dataset
+
+
+def downsample_image(image: np.ndarray, factor: int) -> np.ndarray:
+    if factor <= 1:
+        return image
+    return image[::factor, ::factor]
 
 
 def find_candidate_datasets(h5_file: h5py.File) -> list[str]:
@@ -179,7 +192,12 @@ def projection_count(projection_file: Path, dataset_path: str | None = None) -> 
         return int(dataset.shape[0])
 
 
-def load_projection(projection_file: Path, projection_index: int, dataset_path: str | None = None) -> np.ndarray:
+def load_projection(
+    projection_file: Path,
+    projection_index: int,
+    dataset_path: str | None = None,
+    downsample: int = 1,
+) -> np.ndarray:
     if projection_index < 0:
         raise RuntimeError("Projection index must be >= 0")
 
@@ -192,7 +210,8 @@ def load_projection(projection_file: Path, projection_index: int, dataset_path: 
                 f"Projection index {projection_index} is out of range for {projection_file} "
                 f"(available: 0..{frame_count - 1})"
             )
-        return np.asarray(dataset[projection_index], dtype=np.float32)
+        image = np.asarray(dataset[projection_index, ::downsample, ::downsample], dtype=np.float32)
+        return image
 
 
 def dataset_series_name(dataset_root: Path) -> str:
@@ -307,11 +326,14 @@ def main() -> int:
     if projection_index < 0:
         print("Projection index must be >= 0.")
         return 1
+    if args.downsample < 1:
+        print("Downsample factor must be >= 1.")
+        return 1
 
     try:
         reference_dataset_root, reference_projection_file = resolve_projection_file(reference_path)
         first_count = projection_count(reference_projection_file, args.dataset_path)
-        first_image = load_projection(reference_projection_file, projection_index, args.dataset_path)
+        first_image = load_projection(reference_projection_file, projection_index, args.dataset_path, args.downsample)
 
         current_dataset_root, current_projection_file, auto_follow = resolve_second_target(
             reference_dataset_root,
@@ -319,7 +341,7 @@ def main() -> int:
             args.position_mode,
         )
         second_count = projection_count(current_projection_file, args.dataset_path)
-        second_image = load_projection(current_projection_file, projection_index, args.dataset_path)
+        second_image = load_projection(current_projection_file, projection_index, args.dataset_path, args.downsample)
     except Exception as exc:
         print(f"Startup failed: {exc}")
         return 1
@@ -343,6 +365,7 @@ def main() -> int:
     print(f"Comparison projections available: {second_count}")
     print(f"Using projection index: {projection_index}")
     print(f"Position mode: {args.position_mode}")
+    print(f"Display downsample: {args.downsample}")
     if auto_follow:
         print(f"Watching collection for newer tomography datasets: {reference_dataset_root.parent}")
 
@@ -366,7 +389,12 @@ def main() -> int:
             if current_dataset_root != last_seen_dataset:
                 try:
                     second_count = projection_count(current_projection_file, args.dataset_path)
-                    second_image = load_projection(current_projection_file, projection_index, args.dataset_path)
+                    second_image = load_projection(
+                        current_projection_file,
+                        projection_index,
+                        args.dataset_path,
+                        args.downsample,
+                    )
                     diff_image = second_image - first_image
                     update_display(
                         image_artist,

@@ -27,7 +27,8 @@ Auto-follow the latest dataset with the same position:
 python3 live_tomo_diff_nx.py \
   --reference-path 0_39/039_Estaillades_WW_Drainage_first_position \
   --projection-index 237 \
-  --position-mode same
+  --position-mode same \
+  --downsample 2
 ```
 
 You can also pass the projection `.nx` file directly:
@@ -43,3 +44,4 @@ python3 live_tomo_diff_nx.py \
 - `--projection-index` is zero-based within the `.nx` projection stack.
 - `--position-mode same` restricts auto-follow to datasets matching the same position label as the reference dataset.
 - `--position-mode all` allows auto-follow across all positions in the same collection directory.
+- `--downsample` reduces the displayed image size at read time and can make the viewer feel much faster on large images.

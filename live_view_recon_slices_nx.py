@@ -6,6 +6,7 @@ import argparse
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import h5py
 import matplotlib.pyplot as plt
@@ -85,6 +86,17 @@ def parse_args() -> argparse.Namespace:
         default="gray",
         help="Matplotlib colormap. Default: gray.",
     )
+    parser.add_argument(
+        "--downsample",
+        type=int,
+        default=2,
+        help="Display downsampling factor. 1 keeps full resolution. Default: 2.",
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Use a faster display mode: downsample by 2 and, in orthogonal mode, skip the slow YZ view.",
+    )
     return parser.parse_args()
 
 
@@ -112,6 +124,12 @@ def read_dataset(h5_file: h5py.File, dataset_path: str) -> h5py.Dataset:
     if not isinstance(dataset, h5py.Dataset):
         raise RuntimeError(f"{dataset_path} is not a dataset")
     return dataset
+
+
+def downsample_image(image: np.ndarray, factor: int) -> np.ndarray:
+    if factor <= 1:
+        return image
+    return image[::factor, ::factor]
 
 
 def find_candidate_datasets(h5_file: h5py.File) -> list[str]:
@@ -199,6 +217,22 @@ def extract_slice(volume: h5py.Dataset, axis: int, index: int) -> np.ndarray:
     else:
         image = volume[:, :, index]
     return np.asarray(image, dtype=np.float32)
+
+
+def extract_slice_downsampled(volume: h5py.Dataset, axis: int, index: int, downsample: int) -> np.ndarray:
+    if downsample <= 1:
+        return extract_slice(volume, axis, index)
+    if axis == 0:
+        image = volume[index, ::downsample, ::downsample]
+    elif axis == 1:
+        image = volume[::downsample, index, ::downsample]
+    else:
+        image = volume[::downsample, ::downsample, index]
+    return np.asarray(image, dtype=np.float32)
+
+
+def orthogonal_axes(fast: bool) -> list[int]:
+    return [0, 1] if fast else [0, 1, 2]
 
 
 def is_dataset_directory(path: Path) -> bool:
@@ -339,6 +373,8 @@ def load_volume_slices(
     axis: int,
     slice_indices: list[int],
     dataset_path: str | None,
+    downsample: int,
+    fast: bool,
 ) -> tuple[str, list[np.ndarray]]:
     resolved_dataset_path = resolve_volume_dataset(recon_file, dataset_path)
     with h5py.File(recon_file, "r") as h5_file:
@@ -347,13 +383,66 @@ def load_volume_slices(
             if orthogonal_center is None:
                 raise RuntimeError("Orthogonal center is required in orthogonal mode")
             images = [
-                extract_slice(volume, 0, orthogonal_center[0]),
-                extract_slice(volume, 1, orthogonal_center[1]),
-                extract_slice(volume, 2, orthogonal_center[2]),
+                extract_slice_downsampled(volume, axis_id, orthogonal_center[axis_id], downsample)
+                for axis_id in orthogonal_axes(fast)
             ]
         else:
-            images = [extract_slice(volume, axis, slice_index) for slice_index in slice_indices]
+            images = [
+                extract_slice_downsampled(volume, axis, slice_index, downsample)
+                for slice_index in slice_indices
+            ]
     return resolved_dataset_path, images
+
+
+class VolumeCache:
+    def __init__(self, dataset_path: str | None = None) -> None:
+        self.dataset_path = dataset_path
+        self._path: Path | None = None
+        self._file: h5py.File | None = None
+        self._dataset: h5py.Dataset | None = None
+        self._resolved_dataset_path: str | None = None
+
+    def load(
+        self,
+        path: Path,
+        orthogonal: bool,
+        orthogonal_center: tuple[int, int, int] | None,
+        axis: int,
+        slice_indices: list[int],
+        downsample: int,
+        fast: bool,
+    ) -> tuple[str, list[np.ndarray]]:
+        if self._path != path:
+            self.close()
+            self._file = h5py.File(path, "r")
+            self._resolved_dataset_path = resolve_volume_dataset(path, self.dataset_path)
+            self._dataset = read_dataset(self._file, self._resolved_dataset_path)
+            self._path = path
+
+        if self._dataset is None or self._resolved_dataset_path is None:
+            raise RuntimeError("Dataset cache is not initialized")
+
+        if orthogonal:
+            if orthogonal_center is None:
+                raise RuntimeError("Orthogonal center is required in orthogonal mode")
+            images = [
+                extract_slice_downsampled(self._dataset, axis_id, orthogonal_center[axis_id], downsample)
+                for axis_id in orthogonal_axes(fast)
+            ]
+        else:
+            images = [
+                extract_slice_downsampled(self._dataset, axis, slice_index, downsample)
+                for slice_index in slice_indices
+            ]
+        return self._resolved_dataset_path, images
+
+    def close(self) -> None:
+        if self._file is not None:
+            self._file.close()
+        self._file = None
+        self._dataset = None
+        self._path = None
+        self._resolved_dataset_path = None
 
 
 def update_display(
@@ -367,14 +456,12 @@ def update_display(
     orthogonal: bool,
     orthogonal_center: tuple[int, int, int] | None,
     baseline_images: list[np.ndarray] | None,
+    fast: bool,
 ) -> None:
     labels: list[str] = []
     if orthogonal:
-        labels = [
-            f"XY @ {orthogonal_center}",
-            f"XZ @ {orthogonal_center}",
-            f"YZ @ {orthogonal_center}",
-        ]
+        plane_labels = {0: "XY", 1: "XZ", 2: "YZ"}
+        labels = [f"{plane_labels[axis_id]} @ {orthogonal_center}" for axis_id in orthogonal_axes(fast)]
     else:
         labels = [f"Axis {axis_index} slice {slice_index}" for slice_index in slice_indices]
 
@@ -440,7 +527,14 @@ def main() -> int:
     if reference_path is None:
         print("Reference path is required.")
         return 1
+    if args.fast:
+        args.downsample = max(args.downsample, 2)
+    if args.downsample < 1:
+        print("Downsample factor must be >= 1.")
+        return 1
 
+    current_cache = VolumeCache(args.dataset_path)
+    baseline_cache = VolumeCache(args.dataset_path)
     try:
         reference_dataset_root, reference_recon_file = resolve_reconstruction_target(reference_path)
         _, reference_shape, slice_indices, orthogonal_center = load_volume_metadata(
@@ -457,13 +551,14 @@ def main() -> int:
         baseline_images = None
         if difference_path is not None:
             baseline_dataset_root, baseline_recon_file = resolve_reconstruction_target(difference_path)
-            _, baseline_images = load_volume_slices(
+            _, baseline_images = baseline_cache.load(
                 baseline_recon_file,
                 args.orthogonal or args.orthogonal_center is not None,
                 orthogonal_center,
                 args.axis,
                 slice_indices,
-                args.dataset_path,
+                args.downsample,
+                args.fast,
             )
 
         current_dataset_root, current_recon_file, auto_follow = resolve_display_target(
@@ -472,19 +567,22 @@ def main() -> int:
             comparison_path,
             args.position_mode,
         )
-        dataset_path, current_images = load_volume_slices(
+        dataset_path, current_images = current_cache.load(
             current_recon_file,
             args.orthogonal or args.orthogonal_center is not None,
             orthogonal_center,
             args.axis,
             slice_indices,
-            args.dataset_path,
+            args.downsample,
+            args.fast,
         )
     except Exception as exc:
+        current_cache.close()
+        baseline_cache.close()
         print(f"Startup failed: {exc}")
         return 1
 
-    display_count = 3 if (args.orthogonal or args.orthogonal_center is not None) else len(slice_indices)
+    display_count = len(orthogonal_axes(args.fast)) if (args.orthogonal or args.orthogonal_center is not None) else len(slice_indices)
     if baseline_images is not None:
         display_count *= 2
     cols = min(2, display_count)
@@ -511,6 +609,7 @@ def main() -> int:
         args.orthogonal or args.orthogonal_center is not None,
         orthogonal_center,
         baseline_images,
+        args.fast,
     )
 
     print(f"Reference dataset: {reference_dataset_root}")
@@ -522,6 +621,8 @@ def main() -> int:
         print(f"Difference baseline dataset: {baseline_dataset_root}")
         print(f"Difference baseline file: {baseline_recon_file}")
     print(f"Dataset path: {dataset_path}")
+    print(f"Display downsample: {args.downsample}")
+    print(f"Fast mode: {args.fast}")
     if args.orthogonal or args.orthogonal_center is not None:
         print(f"Orthogonal center: {orthogonal_center}")
     else:
@@ -551,13 +652,14 @@ def main() -> int:
 
             if current_recon_file != last_seen_file:
                 try:
-                    _, current_images = load_volume_slices(
+                    _, current_images = current_cache.load(
                         current_recon_file,
                         args.orthogonal or args.orthogonal_center is not None,
                         orthogonal_center,
                         args.axis,
                         slice_indices,
-                        args.dataset_path,
+                        args.downsample,
+                        args.fast,
                     )
                     update_display(
                         axes[:display_count],
@@ -570,6 +672,7 @@ def main() -> int:
                         args.orthogonal or args.orthogonal_center is not None,
                         orthogonal_center,
                         baseline_images,
+                        args.fast,
                     )
                     print(f"Updated reconstruction dataset: {current_dataset_root}")
                     print(f"Updated reconstruction file: {current_recon_file}")
@@ -580,6 +683,9 @@ def main() -> int:
             plt.pause(args.poll_interval)
     except KeyboardInterrupt:
         print("\nStopped.")
+    finally:
+        current_cache.close()
+        baseline_cache.close()
 
     return 0
 
