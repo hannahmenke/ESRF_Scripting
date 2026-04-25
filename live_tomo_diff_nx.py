@@ -12,6 +12,7 @@ from typing import Any
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
 
 
 POLL_INTERVAL = 2.0
@@ -258,6 +259,114 @@ def load_projection(
         return image
 
 
+def projection_angle_degrees(projection_index: int, frame_count: int) -> float:
+    if frame_count <= 1:
+        return 0.0
+    return 180.0 * float(projection_index) / float(frame_count - 1)
+
+
+def parse_gallery_angle(path: Path) -> float | None:
+    match = re.search(r"_(\d+(?:\.\d+)?)deg(?:_large)?\.jpg$", path.name)
+    if match is None:
+        return None
+    return float(match.group(1))
+
+
+def find_gallery_projection(dataset_root: Path, projection_index: int, frame_count: int) -> tuple[Path, float]:
+    gallery_dir = dataset_root / "projections" / "gallery"
+    if not gallery_dir.is_dir():
+        raise RuntimeError(f"No gallery directory found in {dataset_root / 'projections'}")
+
+    candidates: list[tuple[Path, float]] = []
+    for path in gallery_dir.glob("*.jpg"):
+        angle = parse_gallery_angle(path)
+        if angle is None:
+            continue
+        candidates.append((path, angle))
+
+    if not candidates:
+        raise RuntimeError(f"No gallery JPG previews found in {gallery_dir}")
+
+    target_angle = projection_angle_degrees(projection_index, frame_count)
+    candidates.sort(
+        key=lambda item: (
+            abs(item[1] - target_angle),
+            0 if "_large" in item[0].name else 1,
+            item[0].name,
+        )
+    )
+    return candidates[0]
+
+
+def load_gallery_projection(
+    dataset_root: Path,
+    projection_index: int,
+    frame_count: int,
+    downsample: int = 1,
+) -> tuple[np.ndarray, Path, float]:
+    gallery_path, gallery_angle = find_gallery_projection(dataset_root, projection_index, frame_count)
+    with Image.open(gallery_path) as image:
+        projection = np.asarray(image.convert("F"), dtype=np.float32)
+    if downsample > 1:
+        projection = projection[::downsample, ::downsample]
+    return projection, gallery_path, gallery_angle
+
+
+def center_crop_to_shape(image: np.ndarray, rows: int, cols: int) -> np.ndarray:
+    if rows <= 0 or cols <= 0:
+        raise RuntimeError(f"Invalid crop target shape ({rows}, {cols})")
+    if image.shape[0] < rows or image.shape[1] < cols:
+        raise RuntimeError(f"Cannot crop image shape {image.shape} to ({rows}, {cols})")
+
+    row_start = (image.shape[0] - rows) // 2
+    col_start = (image.shape[1] - cols) // 2
+    return image[row_start : row_start + rows, col_start : col_start + cols]
+
+
+def align_image_pair(first_image: np.ndarray, second_image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    common_rows = min(first_image.shape[0], second_image.shape[0])
+    common_cols = min(first_image.shape[1], second_image.shape[1])
+    if common_rows <= 0 or common_cols <= 0:
+        raise RuntimeError(
+            f"Cannot align empty overlapping image shapes: "
+            f"reference={first_image.shape}, comparison={second_image.shape}"
+        )
+    return (
+        center_crop_to_shape(first_image, common_rows, common_cols),
+        center_crop_to_shape(second_image, common_rows, common_cols),
+    )
+
+
+def load_projection_with_fallback(
+    dataset_root: Path,
+    projection_file: Path,
+    projection_index: int,
+    dataset_path: str | None = None,
+    downsample: int = 1,
+) -> tuple[np.ndarray, str]:
+    frame_count = projection_count(projection_file, dataset_path)
+    try:
+        return load_projection(projection_file, projection_index, dataset_path, downsample), projection_file.name
+    except RuntimeError as exc:
+        message = str(exc)
+        if "entirely zero" not in message:
+            raise
+        gallery_image, gallery_path, gallery_angle = load_gallery_projection(
+            dataset_root,
+            projection_index,
+            frame_count,
+            downsample,
+        )
+        LOGGER.warning(
+            "Projection data in %s are all zero at index %s; using gallery fallback %s (%.2f deg).",
+            projection_file,
+            projection_index,
+            gallery_path.name,
+            gallery_angle,
+        )
+        return gallery_image, gallery_path.name
+
+
 def dataset_series_name(dataset_root: Path) -> str:
     return re.sub(r"_\d{4}$", "", dataset_root.name)
 
@@ -323,6 +432,8 @@ def update_display(
     diff_image: np.ndarray,
     first_dataset_root: Path,
     second_dataset_root: Path,
+    first_source: str,
+    second_source: str,
 ) -> None:
     image_artist.set_data(diff_image)
 
@@ -333,7 +444,10 @@ def update_display(
         diff_max += 0.5
     image_artist.set_clim(vmin=diff_min, vmax=diff_max)
 
-    axis.set_title(f"{second_dataset_root.name} - {first_dataset_root.name}")
+    axis.set_title(
+        f"{second_dataset_root.name} - {first_dataset_root.name}\n"
+        f"comparison: {second_source} | reference: {first_source}"
+    )
     plt.draw()
     plt.pause(0.001)
 
@@ -383,7 +497,13 @@ def main() -> int:
     try:
         reference_dataset_root, reference_projection_file = resolve_projection_file(reference_path)
         first_count = projection_count(reference_projection_file, args.dataset_path)
-        first_image = load_projection(reference_projection_file, projection_index, args.dataset_path, args.downsample)
+        first_image, first_source = load_projection_with_fallback(
+            reference_dataset_root,
+            reference_projection_file,
+            projection_index,
+            args.dataset_path,
+            args.downsample,
+        )
 
         current_dataset_root, current_projection_file, auto_follow = resolve_second_target(
             reference_dataset_root,
@@ -391,7 +511,14 @@ def main() -> int:
             args.position_mode,
         )
         second_count = projection_count(current_projection_file, args.dataset_path)
-        second_image = load_projection(current_projection_file, projection_index, args.dataset_path, args.downsample)
+        second_image, second_source = load_projection_with_fallback(
+            current_dataset_root,
+            current_projection_file,
+            projection_index,
+            args.dataset_path,
+            args.downsample,
+        )
+        first_image, second_image = align_image_pair(first_image, second_image)
     except Exception as exc:
         log_exception_summary("Startup failed", exc)
         return 1
@@ -405,13 +532,23 @@ def main() -> int:
     colorbar.set_label("Difference")
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
-    update_display(image_artist, ax, diff_image, reference_dataset_root, current_dataset_root)
+    update_display(
+        image_artist,
+        ax,
+        diff_image,
+        reference_dataset_root,
+        current_dataset_root,
+        first_source,
+        second_source,
+    )
 
     LOGGER.info("Reference dataset: %s", reference_dataset_root)
     LOGGER.info("Reference projections file: %s", reference_projection_file)
+    LOGGER.info("Reference image source: %s", first_source)
     LOGGER.info("Reference projections available: %s", first_count)
     LOGGER.info("Starting comparison dataset: %s", current_dataset_root)
     LOGGER.info("Starting comparison file: %s", current_projection_file)
+    LOGGER.info("Starting comparison image source: %s", second_source)
     LOGGER.info("Comparison projections available: %s", second_count)
     LOGGER.info("Using projection index: %s", projection_index)
     LOGGER.info("Position mode: %s", args.position_mode)
@@ -441,22 +578,27 @@ def main() -> int:
             if current_dataset_root != last_seen_dataset:
                 try:
                     second_count = projection_count(current_projection_file, args.dataset_path)
-                    second_image = load_projection(
+                    second_image, second_source = load_projection_with_fallback(
+                        current_dataset_root,
                         current_projection_file,
                         projection_index,
                         args.dataset_path,
                         args.downsample,
                     )
-                    diff_image = second_image - first_image
+                    first_aligned, second_aligned = align_image_pair(first_image, second_image)
+                    diff_image = second_aligned - first_aligned
                     update_display(
                         image_artist,
                         ax,
                         diff_image,
                         reference_dataset_root,
                         current_dataset_root,
+                        first_source,
+                        second_source,
                     )
                     LOGGER.info("Updated comparison dataset: %s", current_dataset_root)
                     LOGGER.info("Updated comparison file: %s", current_projection_file)
+                    LOGGER.info("Updated comparison image source: %s", second_source)
                     LOGGER.info("Comparison projections available: %s", second_count)
                     last_seen_dataset = current_dataset_root
                 except Exception as exc:
