@@ -339,6 +339,13 @@ def dataset_series_name(dataset_root: Path) -> str:
     return re.sub(r"_\d{4}$", "", name)
 
 
+def dataset_sequence_number(dataset_root: Path) -> int:
+    match = re.search(r"_(\d{4})$", dataset_root.name)
+    if match:
+        return int(match.group(1))
+    return 0
+
+
 def dataset_position_name(dataset_root: Path, collection_dir: Path) -> str:
     series_name = dataset_series_name(dataset_root)
     prefix = f"{collection_dir.name}_"
@@ -357,26 +364,35 @@ def is_dataset_directory(path: Path) -> bool:
 
 def latest_projection_dataset(
     collection_dir: Path,
-    exclude: Path | None = None,
+    projection_index: int,
+    dataset_path: str | None,
     position_name: str | None = None,
+    exclude: Path | None = None,
 ) -> Path | None:
-    dataset_dirs = sorted(
-        (path for path in collection_dir.iterdir() if is_dataset_directory(path)),
-        key=lambda path: path.stat().st_mtime,
-    )
+    candidates: list[tuple[int, float, Path]] = []
 
-    for dataset_dir in reversed(dataset_dirs):
+    for dataset_dir in collection_dir.iterdir():
+        if not is_dataset_directory(dataset_dir):
+            continue
         if exclude is not None and dataset_dir == exclude:
             continue
         if position_name is not None and dataset_position_name(dataset_dir, collection_dir) != position_name:
             continue
         try:
-            find_projection_scan(dataset_dir)
+            projection_scan = find_projection_scan(dataset_dir)
+            projection_count = scan_projection_count(projection_scan, dataset_path)
+            if projection_index >= projection_count:
+                continue
+            load_projection_radiogram(projection_scan, projection_index, dataset_path, downsample=1)
         except Exception:
             continue
-        return dataset_dir
+        candidates.append((dataset_sequence_number(dataset_dir), dataset_dir.stat().st_mtime, dataset_dir))
 
-    return None
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], item[1], item[2].name))
+    return candidates[-1][2]
 
 
 def resolve_input_target(raw_path: Path) -> tuple[Path, Path]:
@@ -401,6 +417,8 @@ def resolve_second_target(
     reference_dataset_root: Path,
     second_path: Path | None,
     position_mode: str,
+    projection_index: int,
+    dataset_path: str | None,
 ) -> tuple[Path, Path, bool]:
     if second_path is not None:
         dataset_root, scan_path = resolve_input_target(second_path)
@@ -412,7 +430,8 @@ def resolve_second_target(
 
     latest_dataset = latest_projection_dataset(
         reference_dataset_root.parent,
-        exclude=reference_dataset_root,
+        projection_index,
+        dataset_path,
         position_name=position_name,
     )
     if latest_dataset is None:
@@ -515,6 +534,8 @@ def main() -> int:
             reference_dataset_root,
             comparison_path,
             position_mode,
+            projection_index,
+            args.dataset_path,
         )
         second_count = scan_projection_count(current_scan, args.dataset_path)
         second_image = load_projection_radiogram(current_scan, projection_index, args.dataset_path, args.downsample)
@@ -568,6 +589,8 @@ def main() -> int:
                     position_name = dataset_position_name(reference_dataset_root, reference_dataset_root.parent)
                 newest_dataset = latest_projection_dataset(
                     reference_dataset_root.parent,
+                    projection_index,
+                    args.dataset_path,
                     exclude=reference_dataset_root,
                     position_name=position_name,
                 )
