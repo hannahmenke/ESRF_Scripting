@@ -31,6 +31,24 @@ python3 live_tomo_diff_nx.py \
   --downsample 2
 ```
 
+Use a hot/cold difference colormap:
+
+```bash
+python3 live_tomo_diff_nx.py \
+  --reference-path 0_39/039_Estaillades_WW_Drainage_first_position \
+  --projection-index 237 \
+  --hot-cold
+```
+
+Use the faster display mode:
+
+```bash
+python3 live_tomo_diff_nx.py \
+  --reference-path 0_39/039_Estaillades_WW_Drainage_first_position \
+  --projection-index 237 \
+  --fast
+```
+
 You can also pass the projection `.nx` file directly:
 
 ```bash
@@ -45,3 +63,6 @@ python3 live_tomo_diff_nx.py \
 - `--position-mode same` restricts auto-follow to datasets matching the same position label as the reference dataset.
 - `--position-mode all` allows auto-follow across all positions in the same collection directory.
 - `--downsample` reduces the displayed image size at read time and can make the viewer feel much faster on large images.
+- `--fast` forces the display downsampling to at least `4`.
+- `--hot-cold` switches the difference image to the `coolwarm` colormap.
+- `--colormap` lets you choose any matplotlib colormap explicitly.

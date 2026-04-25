@@ -60,6 +60,21 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Display downsampling factor. 1 keeps full resolution. Default: 1.",
     )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Use a faster display mode by downsampling the projection images by at least 4.",
+    )
+    parser.add_argument(
+        "--colormap",
+        default="gray",
+        help="Matplotlib colormap for the difference image. Default: gray.",
+    )
+    parser.add_argument(
+        "--hot-cold",
+        action="store_true",
+        help="Use a diverging hot/cold colormap for the difference image.",
+    )
     return parser.parse_args()
 
 
@@ -326,9 +341,14 @@ def main() -> int:
     if projection_index < 0:
         print("Projection index must be >= 0.")
         return 1
+    if args.fast:
+        args.downsample = max(args.downsample, 4)
     if args.downsample < 1:
         print("Downsample factor must be >= 1.")
         return 1
+
+    if args.hot_cold:
+        args.colormap = "coolwarm"
 
     try:
         reference_dataset_root, reference_projection_file = resolve_projection_file(reference_path)
@@ -350,7 +370,7 @@ def main() -> int:
 
     plt.ion()
     fig, ax = plt.subplots(figsize=DEFAULT_FIGSIZE)
-    image_artist = ax.imshow(diff_image, cmap="gray")
+    image_artist = ax.imshow(diff_image, cmap=args.colormap)
     colorbar = fig.colorbar(image_artist, ax=ax)
     colorbar.set_label("Difference")
     ax.set_xlabel("X")
@@ -366,6 +386,8 @@ def main() -> int:
     print(f"Using projection index: {projection_index}")
     print(f"Position mode: {args.position_mode}")
     print(f"Display downsample: {args.downsample}")
+    print(f"Fast mode: {args.fast}")
+    print(f"Colormap: {args.colormap}")
     if auto_follow:
         print(f"Watching collection for newer tomography datasets: {reference_dataset_root.parent}")
 
