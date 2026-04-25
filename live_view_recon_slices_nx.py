@@ -26,17 +26,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--reference-path",
         default=None,
-        help="Reference dataset directory or reconstruction HDF5 file.",
+        help="Reference/baseline dataset directory or reconstruction HDF5 file.",
     )
     parser.add_argument(
         "--comparison-path",
         default=None,
-        help="Optional explicit reconstruction HDF5 file or dataset directory to show instead of auto-following.",
+        help="Optional explicit comparison/current reconstruction HDF5 file or dataset directory to show instead of auto-following.",
     )
     parser.add_argument(
         "--difference-path",
         default=None,
-        help="Optional baseline reconstruction HDF5 file or dataset directory used to display current-minus-baseline slices.",
+        help="Deprecated compatibility alias for the reference/baseline path.",
+    )
+    parser.add_argument(
+        "--show-difference",
+        action="store_true",
+        help="Display current-minus-reference slices below the current slices.",
     )
     parser.add_argument(
         "--dataset-path",
@@ -433,7 +438,6 @@ def latest_reconstruction_dataset(
 
 def resolve_display_target(
     reference_dataset_root: Path,
-    reference_recon_file: Path,
     second_path: Path | None,
     position_mode: str,
 ) -> tuple[Path, Path, bool]:
@@ -441,7 +445,18 @@ def resolve_display_target(
         dataset_root, recon_file = resolve_reconstruction_target(second_path)
         return dataset_root, recon_file, False
 
-    return reference_dataset_root, reference_recon_file, True
+    position_name = None
+    if position_mode == "same":
+        position_name = dataset_position_name(reference_dataset_root, reference_dataset_root.parent)
+
+    latest_dataset = latest_reconstruction_dataset(
+        reference_dataset_root.parent,
+        exclude=reference_dataset_root,
+        position_name=position_name,
+    )
+    if latest_dataset is None:
+        raise RuntimeError(f"No comparison reconstruction dataset found in {reference_dataset_root.parent}")
+    return latest_dataset, find_latest_reconstruction_file(latest_dataset), True
 
 
 def load_volume_metadata(
@@ -649,6 +664,17 @@ def main() -> int:
     if reference_path is None:
         LOGGER.error("Reference path is required.")
         return 1
+    if difference_path is not None:
+        LOGGER.warning(
+            "`--difference-path` is deprecated. Use `--reference-path` for the baseline and "
+            "`--comparison-path` for the current reconstruction."
+        )
+        if args.comparison_path is not None:
+            LOGGER.error("`--difference-path` cannot be combined with `--comparison-path`.")
+            return 1
+        comparison_path = reference_path
+        reference_path = difference_path
+        args.show_difference = True
     if args.fast:
         args.downsample = max(args.downsample, 2)
     if args.downsample < 1:
@@ -680,8 +706,8 @@ def main() -> int:
         baseline_dataset_root = None
         baseline_recon_file = None
         baseline_images = None
-        if difference_path is not None:
-            baseline_dataset_root, baseline_recon_file = resolve_reconstruction_target(difference_path)
+        if args.show_difference:
+            baseline_dataset_root, baseline_recon_file = reference_dataset_root, reference_recon_file
             _, baseline_images = baseline_cache.load(
                 baseline_recon_file,
                 args.orthogonal or args.orthogonal_center is not None,
@@ -694,7 +720,6 @@ def main() -> int:
 
         current_dataset_root, current_recon_file, auto_follow = resolve_display_target(
             reference_dataset_root,
-            reference_recon_file,
             comparison_path,
             args.position_mode,
         )
@@ -762,8 +787,8 @@ def main() -> int:
         LOGGER.info("Displayed dataset: %s", current_dataset_root)
         LOGGER.info("Displayed file: %s", current_recon_file)
         if baseline_recon_file is not None:
-            LOGGER.info("Difference baseline dataset: %s", baseline_dataset_root)
-            LOGGER.info("Difference baseline file: %s", baseline_recon_file)
+            LOGGER.info("Difference reference dataset: %s", baseline_dataset_root)
+            LOGGER.info("Difference reference file: %s", baseline_recon_file)
         LOGGER.info("Dataset path: %s", dataset_path)
         LOGGER.info("Display downsample: %s", args.downsample)
         LOGGER.info("Fast mode: %s", args.fast)
@@ -775,6 +800,7 @@ def main() -> int:
             LOGGER.info("Axis: %s", args.axis)
             LOGGER.info("Slices: %s", slice_indices)
         LOGGER.info("Static mode: True")
+        LOGGER.info("Show difference: %s", args.show_difference)
         LOGGER.info("Difference colormap: %s", args.difference_colormap)
         try:
             plt.show()
@@ -789,8 +815,8 @@ def main() -> int:
     LOGGER.info("Starting display dataset: %s", current_dataset_root)
     LOGGER.info("Starting display file: %s", current_recon_file)
     if baseline_recon_file is not None:
-        LOGGER.info("Difference baseline dataset: %s", baseline_dataset_root)
-        LOGGER.info("Difference baseline file: %s", baseline_recon_file)
+        LOGGER.info("Difference reference dataset: %s", baseline_dataset_root)
+        LOGGER.info("Difference reference file: %s", baseline_recon_file)
     LOGGER.info("Dataset path: %s", dataset_path)
     LOGGER.info("Display downsample: %s", args.downsample)
     LOGGER.info("Fast mode: %s", args.fast)
@@ -803,6 +829,7 @@ def main() -> int:
         LOGGER.info("Slices: %s", slice_indices)
     LOGGER.info("Position mode: %s", args.position_mode)
     LOGGER.info("Static mode: False")
+    LOGGER.info("Show difference: %s", args.show_difference)
     LOGGER.info("Difference colormap: %s", args.difference_colormap)
     if auto_follow:
         LOGGER.info("Watching collection for newer reconstructions: %s", reference_dataset_root.parent)
