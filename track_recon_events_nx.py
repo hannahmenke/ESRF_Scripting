@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import csv
 from datetime import datetime, timezone
 import logging
 import math
+import os
 import re
 import sqlite3
 import sys
@@ -93,6 +95,21 @@ def parse_args() -> argparse.Namespace:
         help="Exact HDF5 dataset path for the reconstruction volume.",
     )
     parser.add_argument(
+        "--crop-z",
+        default=None,
+        help="Crop range along Z as start:stop before processing.",
+    )
+    parser.add_argument(
+        "--crop-y",
+        default=None,
+        help="Crop range along Y as start:stop before processing.",
+    )
+    parser.add_argument(
+        "--crop-x",
+        default=None,
+        help="Crop range along X as start:stop before processing.",
+    )
+    parser.add_argument(
         "--output-db",
         default="recon_event_tracker.sqlite",
         help="SQLite database path for detected events. Default: recon_event_tracker.sqlite",
@@ -120,6 +137,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_MAX_EVENTS,
         help="Maximum number of events to store per comparison image. Default: 100",
+    )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Number of worker processes for per-comparison event detection. Default: 1.",
     )
     parser.add_argument(
         "--noise-target-samples",
@@ -155,9 +178,26 @@ def parse_args() -> argparse.Namespace:
         help="Matplotlib colormap for preview difference slices. Default: coolwarm.",
     )
     parser.add_argument(
+        "--diff-display-min",
+        type=float,
+        default=-600.0,
+        help="Minimum display value for difference images in previews and GIFs. Default: -600.",
+    )
+    parser.add_argument(
+        "--diff-display-max",
+        type=float,
+        default=600.0,
+        help="Maximum display value for difference images in previews and GIFs. Default: 600.",
+    )
+    parser.add_argument(
         "--save-gifs",
         action="store_true",
         help="Save orthogonal timeseries GIFs alongside the SQLite/CSV outputs.",
+    )
+    parser.add_argument(
+        "--gif-only",
+        action="store_true",
+        help="Export GIFs and exit without estimating thresholds, detecting events, or writing the SQLite/CSV outputs.",
     )
     parser.add_argument(
         "--gif-labels",
@@ -191,6 +231,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_GIF_FPS,
         help="Frames per second for GIF export. Default: 2.",
+    )
+    parser.add_argument(
+        "--gif-colormap",
+        default="gray",
+        help="Matplotlib colormap for raw GIF frames. Default: gray.",
+    )
+    parser.add_argument(
+        "--gif-diff-colormap",
+        default="coolwarm",
+        help="Matplotlib colormap for difference GIF frames. Default: coolwarm.",
     )
     parser.add_argument(
         "--log-level",
@@ -273,8 +323,47 @@ def resolve_volume_dataset(input_path: Path, dataset_path: str | None) -> str:
         return candidates[0]
 
 
+def parse_crop_range(raw_range: str | None, size: int, axis_name: str) -> tuple[int, int]:
+    if raw_range is None:
+        return 0, size
+
+    parts = raw_range.split(":", 1)
+    if len(parts) != 2:
+        raise RuntimeError(f"{axis_name} crop must be formatted as start:stop")
+
+    start_raw, stop_raw = parts
+    start = int(start_raw) if start_raw.strip() else 0
+    stop = int(stop_raw) if stop_raw.strip() else size
+
+    if start < 0:
+        start += size
+    if stop < 0:
+        stop += size
+
+    start = max(0, min(start, size))
+    stop = max(0, min(stop, size))
+    if start >= stop:
+        raise RuntimeError(f"{axis_name} crop must satisfy start < stop within 0:{size}")
+    return start, stop
+
+
+def crop_ranges_for_shape(
+    shape: tuple[int, int, int],
+    crop_z: str | None,
+    crop_y: str | None,
+    crop_x: str | None,
+) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
+    return (
+        parse_crop_range(crop_z, shape[0], "Z"),
+        parse_crop_range(crop_y, shape[1], "Y"),
+        parse_crop_range(crop_x, shape[2], "X"),
+    )
+
+
 def is_dataset_directory(path: Path) -> bool:
-    return path.is_dir() and (path / "projections").is_dir()
+    return path.is_dir() and (
+        (path / "projections").is_dir() or (path / "reconstructed_volumes").is_dir()
+    )
 
 
 def resolve_dataset_root(path: Path) -> Path:
@@ -398,6 +487,13 @@ def build_stepwise_comparisons(
         return []
 
     all_datasets = sorted(all_datasets, key=lambda item: item[0])
+    for sequence_number, dataset_root, recon_file in all_datasets:
+        LOGGER.info(
+            "Admitted series member #%04d: dataset=%s | recon=%s",
+            sequence_number,
+            dataset_root,
+            recon_file,
+        )
 
     low = min(start_number, stop_number)
     high = max(start_number, stop_number)
@@ -426,10 +522,22 @@ def build_stepwise_comparisons(
     return comparisons
 
 
-def volume_shape(recon_file: Path, dataset_path: str) -> tuple[int, int, int]:
+def volume_shape(
+    recon_file: Path,
+    dataset_path: str,
+    crop_z: str | None = None,
+    crop_y: str | None = None,
+    crop_x: str | None = None,
+) -> tuple[int, int, int]:
     with h5py.File(recon_file, "r") as h5_file:
         volume = read_dataset(h5_file, dataset_path)
-        return tuple(int(v) for v in volume.shape)
+        shape = tuple(int(v) for v in volume.shape)
+    z_range, y_range, x_range = crop_ranges_for_shape(shape, crop_z, crop_y, crop_x)
+    return (
+        z_range[1] - z_range[0],
+        y_range[1] - y_range[0],
+        x_range[1] - x_range[0],
+    )
 
 
 def parse_orthogonal_center(raw_center: str | None, shape: tuple[int, int, int]) -> tuple[int, int, int]:
@@ -455,7 +563,17 @@ def choose_sampling_step(shape: tuple[int, int, int], target_sample_count: int) 
     return max(step, 1)
 
 
-def iter_diff_slices(reference_file: Path, comparison_file: Path, dataset_path: str):
+def iter_diff_slices(
+    reference_file: Path,
+    comparison_file: Path,
+    dataset_path: str,
+    z_indices: list[int] | None = None,
+    y_step: int = 1,
+    x_step: int = 1,
+    crop_z: str | None = None,
+    crop_y: str | None = None,
+    crop_x: str | None = None,
+):
     with h5py.File(reference_file, "r") as ref_h5, h5py.File(comparison_file, "r") as cmp_h5:
         ref_volume = read_dataset(ref_h5, dataset_path)
         cmp_volume = read_dataset(cmp_h5, dataset_path)
@@ -465,13 +583,35 @@ def iter_diff_slices(reference_file: Path, comparison_file: Path, dataset_path: 
                 f"{comparison_file} {tuple(cmp_volume.shape)}"
             )
 
-        for z_index in range(int(ref_volume.shape[0])):
-            ref_slice = np.asarray(ref_volume[z_index], dtype=np.float32)
-            cmp_slice = np.asarray(cmp_volume[z_index], dtype=np.float32)
-            yield z_index, cmp_slice - ref_slice
+        full_shape = tuple(int(v) for v in ref_volume.shape)
+        z_range, y_range, x_range = crop_ranges_for_shape(full_shape, crop_z, crop_y, crop_x)
+
+        if z_indices is None:
+            z_iterable = range(z_range[0], z_range[1])
+        else:
+            z_iterable = [z_range[0] + z_index for z_index in z_indices]
+
+        for full_z_index in z_iterable:
+            ref_slice = np.asarray(
+                ref_volume[full_z_index, y_range[0]:y_range[1]:y_step, x_range[0]:x_range[1]:x_step],
+                dtype=np.float32,
+            )
+            cmp_slice = np.asarray(
+                cmp_volume[full_z_index, y_range[0]:y_range[1]:y_step, x_range[0]:x_range[1]:x_step],
+                dtype=np.float32,
+            )
+            yield full_z_index - z_range[0], cmp_slice - ref_slice
 
 
-def load_slice_pair(reference_file: Path, comparison_file: Path, dataset_path: str, z_index: int) -> tuple[np.ndarray, np.ndarray]:
+def load_slice_pair(
+    reference_file: Path,
+    comparison_file: Path,
+    dataset_path: str,
+    z_index: int,
+    crop_z: str | None = None,
+    crop_y: str | None = None,
+    crop_x: str | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
     with h5py.File(reference_file, "r") as ref_h5, h5py.File(comparison_file, "r") as cmp_h5:
         ref_volume = read_dataset(ref_h5, dataset_path)
         cmp_volume = read_dataset(cmp_h5, dataset_path)
@@ -480,10 +620,14 @@ def load_slice_pair(reference_file: Path, comparison_file: Path, dataset_path: s
                 f"Volume shape mismatch: {reference_file} {tuple(ref_volume.shape)} vs "
                 f"{comparison_file} {tuple(cmp_volume.shape)}"
             )
-        if z_index < 0 or z_index >= int(ref_volume.shape[0]):
-            raise RuntimeError(f"Preview z index {z_index} is out of range for volume depth {int(ref_volume.shape[0])}")
-        ref_slice = np.asarray(ref_volume[z_index], dtype=np.float32)
-        cmp_slice = np.asarray(cmp_volume[z_index], dtype=np.float32)
+        full_shape = tuple(int(v) for v in ref_volume.shape)
+        z_range, y_range, x_range = crop_ranges_for_shape(full_shape, crop_z, crop_y, crop_x)
+        cropped_depth = z_range[1] - z_range[0]
+        if z_index < 0 or z_index >= cropped_depth:
+            raise RuntimeError(f"Preview z index {z_index} is out of range for cropped depth {cropped_depth}")
+        full_z_index = z_range[0] + z_index
+        ref_slice = np.asarray(ref_volume[full_z_index, y_range[0]:y_range[1], x_range[0]:x_range[1]], dtype=np.float32)
+        cmp_slice = np.asarray(cmp_volume[full_z_index, y_range[0]:y_range[1], x_range[0]:x_range[1]], dtype=np.float32)
     return ref_slice, cmp_slice
 
 
@@ -504,16 +648,35 @@ def choose_preview_z(
     comparison_file: Path,
     dataset_path: str,
     preview_z: int | None,
+    crop_z: str | None,
+    crop_y: str | None,
+    crop_x: str | None,
 ) -> int:
-    shape = volume_shape(reference_file, dataset_path)
+    shape = volume_shape(reference_file, dataset_path, crop_z, crop_y, crop_x)
     if preview_z is not None:
         if preview_z < 0 or preview_z >= shape[0]:
             raise RuntimeError(f"--preview-z {preview_z} is out of range for depth {shape[0]}")
         return preview_z
 
+    z_step = max(shape[0] // 64, 1)
+    yx_step = max(min(shape[1], shape[2]) // 512, 1)
+    z_indices = list(range(0, shape[0], z_step))
+    if not z_indices or z_indices[-1] != shape[0] - 1:
+        z_indices.append(shape[0] - 1)
+
     best_z = 0
     best_value = float("-inf")
-    for z_index, diff_slice in iter_diff_slices(reference_file, comparison_file, dataset_path):
+    for z_index, diff_slice in iter_diff_slices(
+        reference_file,
+        comparison_file,
+        dataset_path,
+        z_indices=z_indices,
+        y_step=yx_step,
+        x_step=yx_step,
+        crop_z=crop_z,
+        crop_y=crop_y,
+        crop_x=crop_x,
+    ):
         candidate = float(np.max(np.abs(diff_slice)))
         if candidate > best_value:
             best_value = candidate
@@ -532,7 +695,15 @@ def show_detection_preview(
     previous_sequence_number: int,
     args: argparse.Namespace,
 ) -> None:
-    reference_slice, comparison_slice = load_slice_pair(reference_file, comparison_file, dataset_path, preview_z)
+    reference_slice, comparison_slice = load_slice_pair(
+        reference_file,
+        comparison_file,
+        dataset_path,
+        preview_z,
+        args.crop_z,
+        args.crop_y,
+        args.crop_x,
+    )
     diff_slice = comparison_slice - reference_slice
     mask = np.abs(diff_slice) >= threshold_value
     components = [
@@ -552,7 +723,12 @@ def show_detection_preview(
     axes[1].set_title(f"Current #{sequence_number:04d}")
     fig.colorbar(current_artist, ax=axes[1], fraction=0.046, pad=0.04)
 
-    diff_artist = axes[2].imshow(diff_slice, cmap=args.preview_diff_colormap)
+    diff_artist = axes[2].imshow(
+        diff_slice,
+        cmap=args.preview_diff_colormap,
+        vmin=args.diff_display_min,
+        vmax=args.diff_display_max,
+    )
     axes[2].set_title(f"Difference @ z={preview_z}")
     fig.colorbar(diff_artist, ax=axes[2], fraction=0.046, pad=0.04)
 
@@ -585,36 +761,69 @@ def load_orthogonal_views(
     dataset_path: str,
     center: tuple[int, int, int],
     downsample: int,
+    planes: list[str],
+    crop_z: str | None,
+    crop_y: str | None,
+    crop_x: str | None,
 ) -> dict[str, np.ndarray]:
     with h5py.File(recon_file, "r") as h5_file:
         volume = read_dataset(h5_file, dataset_path)
+        full_shape = tuple(int(v) for v in volume.shape)
+        z_range, y_range, x_range = crop_ranges_for_shape(full_shape, crop_z, crop_y, crop_x)
         z_index, y_index, x_index = center
-        views = {
-            "xy": np.asarray(volume[z_index, ::downsample, ::downsample], dtype=np.float32),
-            "xz": np.asarray(volume[::downsample, y_index, ::downsample], dtype=np.float32),
-            "yz": np.asarray(volume[::downsample, ::downsample, x_index], dtype=np.float32),
-        }
+        full_z_index = z_range[0] + z_index
+        full_y_index = y_range[0] + y_index
+        full_x_index = x_range[0] + x_index
+        views: dict[str, np.ndarray] = {}
+        if "xy" in planes:
+            views["xy"] = np.asarray(
+                volume[full_z_index, y_range[0]:y_range[1]:downsample, x_range[0]:x_range[1]:downsample],
+                dtype=np.float32,
+            )
+        if "xz" in planes:
+            views["xz"] = np.asarray(
+                volume[z_range[0]:z_range[1]:downsample, full_y_index, x_range[0]:x_range[1]:downsample],
+                dtype=np.float32,
+            )
+        if "yz" in planes:
+            views["yz"] = np.asarray(
+                volume[z_range[0]:z_range[1]:downsample, y_range[0]:y_range[1]:downsample, full_x_index],
+                dtype=np.float32,
+            )
     return views
 
 
-def normalize_frame(image: np.ndarray) -> np.ndarray:
+def normalize_frame(
+    image: np.ndarray,
+    colormap: str = "gray",
+    display_min: float | None = None,
+    display_max: float | None = None,
+) -> np.ndarray:
     image = np.asarray(image, dtype=np.float32)
     finite = np.isfinite(image)
     if not np.any(finite):
-        return np.zeros(image.shape, dtype=np.uint8)
+        return np.zeros((*image.shape, 3), dtype=np.uint8)
     image = np.where(finite, image, 0.0)
-    low, high = np.percentile(image, (1.0, 99.0))
+    if display_min is not None and display_max is not None:
+        low = float(display_min)
+        high = float(display_max)
+    else:
+        low, high = np.percentile(image, (1.0, 99.0))
+        if float(low) == float(high):
+            low = float(np.min(image))
+            high = float(np.max(image))
     if float(low) == float(high):
-        low = float(np.min(image))
-        high = float(np.max(image))
-    if float(low) == float(high):
-        return np.zeros(image.shape, dtype=np.uint8)
+        return np.zeros((*image.shape, 3), dtype=np.uint8)
     scaled = np.clip((image - low) / (high - low), 0.0, 1.0)
-    return (scaled * 255.0).astype(np.uint8)
+    rgb = np.asarray(plt.get_cmap(colormap)(scaled)[..., :3] * 255.0, dtype=np.uint8)
+    return rgb
 
 
 def annotate_frame(image: np.ndarray, text: str) -> np.ndarray:
-    pil_image = Image.fromarray(image, mode="L").convert("RGB")
+    if image.ndim == 2:
+        pil_image = Image.fromarray(image, mode="L").convert("RGB")
+    else:
+        pil_image = Image.fromarray(image, mode="RGB")
     draw = ImageDraw.Draw(pil_image, "RGBA")
     font = ImageFont.load_default()
     left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
@@ -630,6 +839,55 @@ def annotate_frame(image: np.ndarray, text: str) -> np.ndarray:
     return np.asarray(pil_image)
 
 
+def build_gif_frames_for_plane(
+    comparison: tuple[int, Path, Path, int, Path, Path],
+    dataset_path: str,
+    center: tuple[int, int, int],
+    plane: str,
+    mode: str,
+    downsample: int,
+    labels: bool,
+    raw_colormap: str,
+    diff_colormap: str,
+    diff_display_min: float,
+    diff_display_max: float,
+    crop_z: str | None,
+    crop_y: str | None,
+    crop_x: str | None,
+) -> tuple[int, dict[str, np.ndarray]]:
+    sequence_number, _dataset_root, recon_file, previous_sequence, _previous_dataset_root, previous_recon_file = comparison
+    current_views = load_orthogonal_views(recon_file, dataset_path, center, downsample, [plane], crop_z, crop_y, crop_x)
+    previous_views = load_orthogonal_views(previous_recon_file, dataset_path, center, downsample, [plane], crop_z, crop_y, crop_x)
+    label = f"#{sequence_number:04d} prev #{previous_sequence:04d}"
+    frames: dict[str, np.ndarray] = {}
+
+    if mode in {"raw", "both"}:
+        key = f"{plane}_raw"
+        frame = normalize_frame(current_views[plane], raw_colormap)
+        if labels:
+            frame = annotate_frame(frame, label)
+        frames[key] = frame
+    if mode in {"diff", "both"}:
+        key = f"{plane}_diff"
+        diff_view = current_views[plane] - previous_views[plane]
+        frame = normalize_frame(
+            diff_view,
+            diff_colormap,
+            diff_display_min,
+            diff_display_max,
+        )
+        if labels:
+            frame = annotate_frame(frame, label)
+        frames[key] = frame
+
+    return sequence_number, frames
+
+
+def write_gif_file(output_path: Path, frames: list[np.ndarray], fps: int) -> Path:
+    imageio.mimsave(output_path, frames, duration=1.0 / max(fps, 1))
+    return output_path
+
+
 def save_timeseries_gifs(
     comparisons: list[tuple[int, Path, Path, int, Path, Path]],
     dataset_path: str,
@@ -640,34 +898,86 @@ def save_timeseries_gifs(
     downsample: int,
     fps: int,
     labels: bool,
+    raw_colormap: str,
+    diff_colormap: str,
+    diff_display_min: float,
+    diff_display_max: float,
+    crop_z: str | None,
+    crop_y: str | None,
+    crop_x: str | None,
+    jobs: int,
 ) -> list[Path]:
     frame_sets: dict[str, list[np.ndarray]] = {}
     output_paths: list[Path] = []
+    plane_tasks = [(comparison, plane) for comparison in comparisons for plane in planes]
+    if jobs > 1 and len(plane_tasks) > 1:
+        max_workers = min(jobs, len(plane_tasks), os.cpu_count() or jobs)
+        LOGGER.info("Running GIF frame generation in parallel with %d workers", max_workers)
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            task_results = list(
+                executor.map(
+                    build_gif_frames_for_plane,
+                    (comparison for comparison, _plane in plane_tasks),
+                    [dataset_path] * len(plane_tasks),
+                    [center] * len(plane_tasks),
+                    (plane for _comparison, plane in plane_tasks),
+                    [mode] * len(plane_tasks),
+                    [downsample] * len(plane_tasks),
+                    [labels] * len(plane_tasks),
+                    [raw_colormap] * len(plane_tasks),
+                    [diff_colormap] * len(plane_tasks),
+                    [diff_display_min] * len(plane_tasks),
+                    [diff_display_max] * len(plane_tasks),
+                    [crop_z] * len(plane_tasks),
+                    [crop_y] * len(plane_tasks),
+                    [crop_x] * len(plane_tasks),
+                )
+            )
+    else:
+        task_results = [
+            build_gif_frames_for_plane(
+                comparison,
+                dataset_path,
+                center,
+                plane,
+                mode,
+                downsample,
+                labels,
+                raw_colormap,
+                diff_colormap,
+                diff_display_min,
+                diff_display_max,
+                crop_z,
+                crop_y,
+                crop_x,
+            )
+            for comparison, plane in plane_tasks
+        ]
 
-    for sequence_number, dataset_root, recon_file, previous_sequence, previous_dataset_root, previous_recon_file in comparisons:
-        current_views = load_orthogonal_views(recon_file, dataset_path, center, downsample)
-        previous_views = load_orthogonal_views(previous_recon_file, dataset_path, center, downsample)
-        label = f"#{sequence_number:04d} prev #{previous_sequence:04d}"
+    task_results.sort(key=lambda item: item[0])
+    for _sequence_number, frames in task_results:
+        for key, frame in frames.items():
+            frame_sets.setdefault(key, []).append(frame)
 
-        for plane in planes:
-            if mode in {"raw", "both"}:
-                key = f"{plane}_raw"
-                frame = normalize_frame(current_views[plane])
-                if labels:
-                    frame = annotate_frame(frame, label)
-                frame_sets.setdefault(key, []).append(frame)
-            if mode in {"diff", "both"}:
-                key = f"{plane}_diff"
-                diff_view = current_views[plane] - previous_views[plane]
-                frame = normalize_frame(diff_view)
-                if labels:
-                    frame = annotate_frame(frame, label)
-                frame_sets.setdefault(key, []).append(frame)
-
-    for key, frames in frame_sets.items():
-        output_path = output_db.with_name(f"{output_db.stem}_{key}.gif")
-        imageio.mimsave(output_path, frames, duration=1.0 / max(fps, 1))
-        output_paths.append(output_path)
+    gif_tasks = [
+        (output_db.with_name(f"{output_db.stem}_{key}.gif"), frames)
+        for key, frames in frame_sets.items()
+    ]
+    if jobs > 1 and len(gif_tasks) > 1:
+        max_workers = min(jobs, len(gif_tasks), os.cpu_count() or jobs)
+        LOGGER.info("Writing GIF files in parallel with %d workers", max_workers)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            output_paths = list(
+                executor.map(
+                    write_gif_file,
+                    (output_path for output_path, _frames in gif_tasks),
+                    (frames for _output_path, frames in gif_tasks),
+                    [fps] * len(gif_tasks),
+                )
+            )
+    else:
+        for output_path, frames in gif_tasks:
+            output_paths.append(write_gif_file(output_path, frames, fps))
     return output_paths
 
 
@@ -676,16 +986,31 @@ def estimate_baseline_sigma(
     comparison_file: Path,
     dataset_path: str,
     target_sample_count: int,
+    crop_z: str | None = None,
+    crop_y: str | None = None,
+    crop_x: str | None = None,
 ) -> float:
-    shape = volume_shape(reference_file, dataset_path)
+    shape = volume_shape(reference_file, dataset_path, crop_z, crop_y, crop_x)
     step = choose_sampling_step(shape, target_sample_count)
     samples: list[np.ndarray] = []
     LOGGER.info("Estimating baseline noise with sampling step %s", step)
 
-    for z_index, diff_slice in iter_diff_slices(reference_file, comparison_file, dataset_path):
-        if z_index % step != 0:
-            continue
-        samples.append(diff_slice[::step, ::step].ravel())
+    z_indices = list(range(0, shape[0], step))
+    if not z_indices:
+        raise RuntimeError("No baseline samples were collected")
+
+    for _z_index, diff_slice in iter_diff_slices(
+        reference_file,
+        comparison_file,
+        dataset_path,
+        z_indices=z_indices,
+        y_step=step,
+        x_step=step,
+        crop_z=crop_z,
+        crop_y=crop_y,
+        crop_x=crop_x,
+    ):
+        samples.append(diff_slice.ravel())
 
     if not samples:
         raise RuntimeError("No baseline samples were collected")
@@ -768,6 +1093,50 @@ def find_slice_components(mask: np.ndarray, diff_slice: np.ndarray, z_index: int
     return components
 
 
+def process_diff_slice_components(
+    z_index: int,
+    diff_slice: np.ndarray,
+    threshold_value: float,
+) -> tuple[int, list[SliceComponent], float]:
+    abs_slice = np.abs(diff_slice)
+    max_abs_diff = float(np.max(abs_slice))
+    mask = abs_slice >= threshold_value
+    components = find_slice_components(mask, diff_slice, z_index)
+    return z_index, components, max_abs_diff
+
+
+def split_indices(indices: list[int], jobs: int) -> list[list[int]]:
+    if not indices:
+        return []
+    worker_count = max(1, min(jobs, len(indices)))
+    chunk_size = int(math.ceil(len(indices) / worker_count))
+    return [indices[offset:offset + chunk_size] for offset in range(0, len(indices), chunk_size)]
+
+
+def process_diff_chunk_components(
+    reference_file: Path,
+    comparison_file: Path,
+    dataset_path: str,
+    z_indices: list[int],
+    threshold_value: float,
+    crop_z: str | None,
+    crop_y: str | None,
+    crop_x: str | None,
+) -> list[tuple[int, list[SliceComponent], float]]:
+    return [
+        process_diff_slice_components(z_index, diff_slice, threshold_value)
+        for z_index, diff_slice in iter_diff_slices(
+            reference_file,
+            comparison_file,
+            dataset_path,
+            z_indices=z_indices,
+            crop_z=crop_z,
+            crop_y=crop_y,
+            crop_x=crop_x,
+        )
+    ]
+
+
 def bboxes_touch(a: Event3D, b: SliceComponent) -> bool:
     return not (
         a.y_max + 1 < b.y_min
@@ -830,17 +1199,51 @@ def detect_events_for_comparison(
     dataset_path: str,
     threshold_value: float,
     min_event_size: int,
+    jobs: int = 1,
+    crop_z: str | None = None,
+    crop_y: str | None = None,
+    crop_x: str | None = None,
 ) -> tuple[list[Event3D], float]:
     all_events: list[Event3D] = []
     active_events: dict[int, Event3D] = {}
     next_event_id = 1
     max_abs_diff = 0.0
+    slice_results: list[tuple[int, list[SliceComponent], float]]
 
-    for z_index, diff_slice in iter_diff_slices(reference_file, comparison_file, dataset_path):
-        abs_slice = np.abs(diff_slice)
-        max_abs_diff = max(max_abs_diff, float(np.max(abs_slice)))
-        mask = abs_slice >= threshold_value
-        components = find_slice_components(mask, diff_slice, z_index)
+    if jobs <= 1:
+        slice_results = [
+            process_diff_slice_components(z_index, diff_slice, threshold_value)
+            for z_index, diff_slice in iter_diff_slices(
+                reference_file,
+                comparison_file,
+                dataset_path,
+                crop_z=crop_z,
+                crop_y=crop_y,
+                crop_x=crop_x,
+            )
+        ]
+    else:
+        cropped_depth = volume_shape(reference_file, dataset_path, crop_z, crop_y, crop_x)[0]
+        z_chunks = split_indices(list(range(cropped_depth)), jobs)
+        max_workers = min(jobs, len(z_chunks), os.cpu_count() or jobs)
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            chunk_results = list(
+                executor.map(
+                    process_diff_chunk_components,
+                    [reference_file] * len(z_chunks),
+                    [comparison_file] * len(z_chunks),
+                    [dataset_path] * len(z_chunks),
+                    z_chunks,
+                    [threshold_value] * len(z_chunks),
+                    [crop_z] * len(z_chunks),
+                    [crop_y] * len(z_chunks),
+                    [crop_x] * len(z_chunks),
+                )
+            )
+        slice_results = [item for chunk in chunk_results for item in chunk]
+
+    for z_index, components, slice_max_abs_diff in sorted(slice_results, key=lambda item: item[0]):
+        max_abs_diff = max(max_abs_diff, slice_max_abs_diff)
         current_active_ids: set[int] = set()
 
         for component in components:
@@ -894,6 +1297,42 @@ def detect_events_for_comparison(
     filtered_events = [event for event in all_events if event.voxel_count >= min_event_size]
     filtered_events.sort(key=lambda event: event.peak_abs_diff, reverse=True)
     return filtered_events, max_abs_diff
+
+
+def process_comparison_task(
+    comparison: tuple[int, Path, Path, int, Path, Path],
+    dataset_path: str,
+    threshold_value: float,
+    min_event_size: int,
+    jobs: int,
+    crop_z: str | None,
+    crop_y: str | None,
+    crop_x: str | None,
+) -> tuple[tuple[int, Path, Path, int, Path, Path], list[Event3D], float]:
+    sequence_number, dataset_root, recon_file, previous_sequence, previous_dataset_root, previous_recon_file = comparison
+    events, max_abs_diff = detect_events_for_comparison(
+        previous_recon_file,
+        recon_file,
+        dataset_path,
+        threshold_value,
+        min_event_size,
+        jobs,
+        crop_z,
+        crop_y,
+        crop_x,
+    )
+    return (
+        (
+            sequence_number,
+            dataset_root,
+            recon_file,
+            previous_sequence,
+            previous_dataset_root,
+            previous_recon_file,
+        ),
+        events,
+        max_abs_diff,
+    )
 
 
 def initialize_database(db_path: Path) -> sqlite3.Connection:
@@ -1089,7 +1528,7 @@ def insert_comparison_result(
                 y_max,
                 x_min,
                 x_max
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 comparison_id,
@@ -1196,18 +1635,28 @@ def main() -> int:
     if args.max_events <= 0:
         LOGGER.error("--max-events must be > 0")
         return 1
+    if args.jobs <= 0:
+        LOGGER.error("--jobs must be > 0")
+        return 1
     if args.gif_downsample <= 0:
         LOGGER.error("--gif-downsample must be > 0")
         return 1
     if args.gif_fps <= 0:
         LOGGER.error("--gif-fps must be > 0")
         return 1
+    if args.gif_only and args.preview:
+        LOGGER.error("--gif-only cannot be used with --preview")
+        return 1
 
     reference_path = Path(args.reference_path).expanduser()
-    output_db = Path(args.output_db).expanduser().resolve()
+    output_db_arg = Path(args.output_db).expanduser()
 
     try:
         reference_dataset_root, reference_recon_file = resolve_reconstruction_target(reference_path, args.dataset_path)
+        if output_db_arg.is_absolute():
+            output_db = output_db_arg.resolve()
+        else:
+            output_db = (reference_dataset_root.parent / output_db_arg).resolve()
         dataset_path = resolve_volume_dataset(reference_recon_file, args.dataset_path)
         comparisons = build_stepwise_comparisons(
             reference_dataset_root,
@@ -1219,7 +1668,10 @@ def main() -> int:
             raise RuntimeError("No stepwise comparison reconstructions found in the requested range")
 
         first_sequence, first_dataset_root, first_recon_file, first_previous_sequence, first_previous_dataset_root, first_previous_recon_file = comparisons[0]
-        center = parse_orthogonal_center(args.orthogonal_center, volume_shape(first_recon_file, dataset_path))
+        center = parse_orthogonal_center(
+            args.orthogonal_center,
+            volume_shape(first_recon_file, dataset_path, args.crop_z, args.crop_y, args.crop_x),
+        )
         requested_planes = [part.strip().lower() for part in args.gif_planes.split(",") if part.strip()]
         valid_planes = {"xy", "xz", "yz"}
         if any(plane not in valid_planes for plane in requested_planes):
@@ -1227,6 +1679,7 @@ def main() -> int:
         LOGGER.info("Series anchor dataset: %s", reference_dataset_root)
         LOGGER.info("Series anchor reconstruction: %s", reference_recon_file)
         LOGGER.info("Dataset path: %s", dataset_path)
+        LOGGER.info("Event detection workers: %d", args.jobs)
         LOGGER.info(
             "Processing sequence order: %s",
             ", ".join(f"#{sequence_number:04d}" for sequence_number, *_rest in comparisons),
@@ -1239,17 +1692,46 @@ def main() -> int:
             first_previous_dataset_root,
         )
 
-        baseline_sigma = estimate_baseline_sigma(
-            first_previous_recon_file,
-            first_recon_file,
-            dataset_path,
-            args.noise_target_samples,
-        )
+        if args.gif_only:
+            gif_paths = save_timeseries_gifs(
+                comparisons,
+                dataset_path,
+                output_db,
+                center,
+                requested_planes,
+                args.gif_mode,
+                args.gif_downsample,
+                args.gif_fps,
+                args.gif_labels,
+                args.gif_colormap,
+                args.gif_diff_colormap,
+                args.diff_display_min,
+                args.diff_display_max,
+                args.crop_z,
+                args.crop_y,
+                args.crop_x,
+                args.jobs,
+            )
+            for gif_path in gif_paths:
+                LOGGER.info("GIF written to %s", gif_path)
+            LOGGER.info("GIF export complete. No database or CSV written.")
+            return 0
+
         if args.absolute_threshold is not None:
+            baseline_sigma = 0.0
             threshold_value = float(args.absolute_threshold)
-            LOGGER.info("Baseline noise sigma: %.6g", baseline_sigma)
+            LOGGER.info("Baseline noise sigma: skipped because --absolute-threshold was provided")
             LOGGER.info("Detection threshold: %.6g (absolute override)", threshold_value)
         else:
+            baseline_sigma = estimate_baseline_sigma(
+                first_previous_recon_file,
+                first_recon_file,
+                dataset_path,
+                args.noise_target_samples,
+                args.crop_z,
+                args.crop_y,
+                args.crop_x,
+            )
             threshold_value = baseline_sigma * args.threshold_sigma
             LOGGER.info("Baseline noise sigma: %.6g", baseline_sigma)
             LOGGER.info("Detection threshold: %.6g", threshold_value)
@@ -1268,6 +1750,9 @@ def main() -> int:
                 preview_recon_file,
                 dataset_path,
                 args.preview_z,
+                args.crop_z,
+                args.crop_y,
+                args.crop_x,
             )
             LOGGER.info(
                 "Showing preview for stepwise comparison #%04d %s minus #%04d %s at z=%s",
@@ -1304,14 +1789,15 @@ def main() -> int:
                 threshold_value,
             )
 
-            for (
-                sequence_number,
-                dataset_root,
-                recon_file,
-                previous_sequence,
-                previous_dataset_root,
-                previous_recon_file,
-            ) in comparisons:
+            for comparison in comparisons:
+                (
+                    sequence_number,
+                    dataset_root,
+                    recon_file,
+                    previous_sequence,
+                    previous_dataset_root,
+                    previous_recon_file,
+                ) = comparison
                 LOGGER.info(
                     "Processing stepwise comparison #%04d: %s minus #%04d: %s",
                     sequence_number,
@@ -1319,12 +1805,21 @@ def main() -> int:
                     previous_sequence,
                     previous_dataset_root,
                 )
-                events, max_abs_diff = detect_events_for_comparison(
-                    previous_recon_file,
-                    recon_file,
+                if args.jobs > 1:
+                    LOGGER.info(
+                        "Running slice detection for #%04d with %d workers",
+                        sequence_number,
+                        min(args.jobs, os.cpu_count() or args.jobs),
+                    )
+                _comparison, events, max_abs_diff = process_comparison_task(
+                    comparison,
                     dataset_path,
                     threshold_value,
                     args.min_event_size,
+                    args.jobs,
+                    args.crop_z,
+                    args.crop_y,
+                    args.crop_x,
                 )
                 stored_events = events[: args.max_events]
                 insert_comparison_result(
@@ -1360,6 +1855,14 @@ def main() -> int:
                     args.gif_downsample,
                     args.gif_fps,
                     args.gif_labels,
+                    args.gif_colormap,
+                    args.gif_diff_colormap,
+                    args.diff_display_min,
+                    args.diff_display_max,
+                    args.crop_z,
+                    args.crop_y,
+                    args.crop_x,
+                    args.jobs,
                 )
                 for gif_path in gif_paths:
                     LOGGER.info("GIF written to %s", gif_path)
