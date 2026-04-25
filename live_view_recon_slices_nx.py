@@ -388,6 +388,20 @@ def is_reconstruction_file(path: Path, dataset_path: str | None = None) -> bool:
         return False
 
 
+def is_readable_reconstruction_file(path: Path, dataset_path: str | None = None) -> bool:
+    try:
+        resolved_dataset_path = resolve_volume_dataset(path, dataset_path)
+        with h5py.File(path, "r") as h5_file:
+            volume = read_dataset(h5_file, resolved_dataset_path)
+            if volume.ndim != 3:
+                return False
+            z_index = min(max(int(volume.shape[0]) // 2, 0), int(volume.shape[0]) - 1)
+            _ = np.asarray(volume[z_index], dtype=np.float32)
+        return True
+    except Exception:
+        return False
+
+
 def find_latest_reconstruction_file(dataset_root: Path, dataset_path: str | None = None) -> Path:
     candidates = candidate_reconstruction_files(dataset_root)
     if not candidates:
@@ -397,12 +411,16 @@ def find_latest_reconstruction_file(dataset_root: Path, dataset_path: str | None
     if not valid_candidates:
         raise RuntimeError(f"No valid reconstruction volume HDF5 files found in {dataset_root}")
 
+    readable_candidates = [path for path in valid_candidates if is_readable_reconstruction_file(path, dataset_path)]
+    if not readable_candidates:
+        raise RuntimeError(f"No readable reconstruction volume HDF5 files found in {dataset_root}")
+
     LOGGER.debug(
         "Reconstruction candidates for %s: %s",
         dataset_root,
-        [path.name for path in valid_candidates],
+        [path.name for path in readable_candidates],
     )
-    return valid_candidates[-1]
+    return readable_candidates[-1]
 
 
 def resolve_reconstruction_target(raw_path: Path, dataset_path: str | None = None) -> tuple[Path, Path]:
