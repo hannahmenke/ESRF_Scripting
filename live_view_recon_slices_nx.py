@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--difference-path",
         default=None,
-        help="Deprecated compatibility alias for the reference/baseline path.",
+        help="Deprecated. Use --reference-path for the baseline and --comparison-path for the current reconstruction.",
     )
     parser.add_argument(
         "--show-difference",
@@ -665,16 +665,12 @@ def main() -> int:
         LOGGER.error("Reference path is required.")
         return 1
     if difference_path is not None:
-        LOGGER.warning(
-            "`--difference-path` is deprecated. Use `--reference-path` for the baseline and "
-            "`--comparison-path` for the current reconstruction."
+        LOGGER.error(
+            "`--difference-path` is no longer supported. "
+            "Use `--reference-path` for the baseline, `--comparison-path` for the current reconstruction, "
+            "and `--show-difference` to display current minus reference."
         )
-        if args.comparison_path is not None:
-            LOGGER.error("`--difference-path` cannot be combined with `--comparison-path`.")
-            return 1
-        comparison_path = reference_path
-        reference_path = difference_path
-        args.show_difference = True
+        return 1
     if args.fast:
         args.downsample = max(args.downsample, 2)
     if args.downsample < 1:

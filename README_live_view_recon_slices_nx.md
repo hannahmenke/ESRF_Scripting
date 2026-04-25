@@ -139,7 +139,7 @@ python3 live_view_recon_slices_nx.py \
 - `--orthogonal-center a,b,c` selects the orthogonal intersection point as axis0,axis1,axis2.
 - `--show-difference` adds a second panel set showing `current - reference`.
 - When `--show-difference` is used, the figure is arranged with current slices on the first row and difference slices on the second row.
-- `--difference-path` is kept only as a deprecated compatibility alias for older commands.
+- `--difference-path` is deprecated and rejected; use `--reference-path`, `--comparison-path`, and `--show-difference` instead.
 - `--hot-cold` switches the difference images to the `coolwarm` colormap.
 - `--difference-colormap` lets you choose any matplotlib colormap explicitly for the difference images.
 - `--downsample` reduces the displayed slice size at read time and is the easiest way to speed up large recon views.
