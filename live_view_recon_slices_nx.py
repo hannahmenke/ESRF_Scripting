@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import sys
 from pathlib import Path
@@ -15,6 +16,7 @@ import numpy as np
 
 POLL_INTERVAL = 2.0
 DEFAULT_FIGSIZE = (18, 10)
+LOGGER = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -127,7 +129,28 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Crop displayed images along Y after downsampling as start:stop.",
     )
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+        help="Logging verbosity. Default: INFO.",
+    )
     return parser.parse_args()
+
+
+def configure_logging(level_name: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, level_name),
+        format="%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+def log_exception_summary(message: str, exc: Exception) -> None:
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.exception("%s", message)
+    else:
+        LOGGER.error("%s: %s", message, exc)
 
 
 def prompt_path(prompt: str, allow_empty: bool = False) -> Path | None:
@@ -138,7 +161,7 @@ def prompt_path(prompt: str, allow_empty: bool = False) -> Path | None:
         path = Path(raw).expanduser()
         if path.exists():
             return path
-        print(f"Path not found: {path}")
+        LOGGER.warning("Path not found: %s", path)
 
 
 def decode_scalar(value):
@@ -598,6 +621,7 @@ def update_display(
 
 def main() -> int:
     args = parse_args()
+    configure_logging(args.log_level)
 
     reference_path = (
         Path(args.reference_path).expanduser()
@@ -623,17 +647,17 @@ def main() -> int:
     )
 
     if reference_path is None:
-        print("Reference path is required.")
+        LOGGER.error("Reference path is required.")
         return 1
     if args.fast:
         args.downsample = max(args.downsample, 2)
     if args.downsample < 1:
-        print("Downsample factor must be >= 1.")
+        LOGGER.error("Downsample factor must be >= 1.")
         return 1
     try:
         args.crop_y, args.crop_x = parse_crop_spec(args.crop, args.crop_x, args.crop_y)
     except Exception as exc:
-        print(f"Invalid crop settings: {exc}")
+        log_exception_summary("Invalid crop settings", exc)
         return 1
     if args.hot_cold:
         args.difference_colormap = "coolwarm"
@@ -686,7 +710,7 @@ def main() -> int:
     except Exception as exc:
         current_cache.close()
         baseline_cache.close()
-        print(f"Startup failed: {exc}")
+        log_exception_summary("Startup failed", exc)
         return 1
 
     base_panel_count = len(orthogonal_axes(args.fast)) if (args.orthogonal or args.orthogonal_center is not None) else len(slice_indices)
@@ -732,26 +756,26 @@ def main() -> int:
 
     if args.static:
         plt.ioff()
-        print(f"Reference dataset: {reference_dataset_root}")
-        print(f"Reference reconstruction: {reference_recon_file}")
-        print(f"Reference volume shape: {reference_shape}")
-        print(f"Displayed dataset: {current_dataset_root}")
-        print(f"Displayed file: {current_recon_file}")
+        LOGGER.info("Reference dataset: %s", reference_dataset_root)
+        LOGGER.info("Reference reconstruction: %s", reference_recon_file)
+        LOGGER.info("Reference volume shape: %s", reference_shape)
+        LOGGER.info("Displayed dataset: %s", current_dataset_root)
+        LOGGER.info("Displayed file: %s", current_recon_file)
         if baseline_recon_file is not None:
-            print(f"Difference baseline dataset: {baseline_dataset_root}")
-            print(f"Difference baseline file: {baseline_recon_file}")
-        print(f"Dataset path: {dataset_path}")
-        print(f"Display downsample: {args.downsample}")
-        print(f"Fast mode: {args.fast}")
-        print(f"Crop X: {args.crop_x or 'full'}")
-        print(f"Crop Y: {args.crop_y or 'full'}")
+            LOGGER.info("Difference baseline dataset: %s", baseline_dataset_root)
+            LOGGER.info("Difference baseline file: %s", baseline_recon_file)
+        LOGGER.info("Dataset path: %s", dataset_path)
+        LOGGER.info("Display downsample: %s", args.downsample)
+        LOGGER.info("Fast mode: %s", args.fast)
+        LOGGER.info("Crop X: %s", args.crop_x or "full")
+        LOGGER.info("Crop Y: %s", args.crop_y or "full")
         if args.orthogonal or args.orthogonal_center is not None:
-            print(f"Orthogonal center: {orthogonal_center}")
+            LOGGER.info("Orthogonal center: %s", orthogonal_center)
         else:
-            print(f"Axis: {args.axis}")
-            print(f"Slices: {slice_indices}")
-        print("Static mode: True")
-        print(f"Difference colormap: {args.difference_colormap}")
+            LOGGER.info("Axis: %s", args.axis)
+            LOGGER.info("Slices: %s", slice_indices)
+        LOGGER.info("Static mode: True")
+        LOGGER.info("Difference colormap: %s", args.difference_colormap)
         try:
             plt.show()
         finally:
@@ -759,29 +783,29 @@ def main() -> int:
             baseline_cache.close()
         return 0
 
-    print(f"Reference dataset: {reference_dataset_root}")
-    print(f"Reference reconstruction: {reference_recon_file}")
-    print(f"Reference volume shape: {reference_shape}")
-    print(f"Starting display dataset: {current_dataset_root}")
-    print(f"Starting display file: {current_recon_file}")
+    LOGGER.info("Reference dataset: %s", reference_dataset_root)
+    LOGGER.info("Reference reconstruction: %s", reference_recon_file)
+    LOGGER.info("Reference volume shape: %s", reference_shape)
+    LOGGER.info("Starting display dataset: %s", current_dataset_root)
+    LOGGER.info("Starting display file: %s", current_recon_file)
     if baseline_recon_file is not None:
-        print(f"Difference baseline dataset: {baseline_dataset_root}")
-        print(f"Difference baseline file: {baseline_recon_file}")
-    print(f"Dataset path: {dataset_path}")
-    print(f"Display downsample: {args.downsample}")
-    print(f"Fast mode: {args.fast}")
-    print(f"Crop X: {args.crop_x or 'full'}")
-    print(f"Crop Y: {args.crop_y or 'full'}")
+        LOGGER.info("Difference baseline dataset: %s", baseline_dataset_root)
+        LOGGER.info("Difference baseline file: %s", baseline_recon_file)
+    LOGGER.info("Dataset path: %s", dataset_path)
+    LOGGER.info("Display downsample: %s", args.downsample)
+    LOGGER.info("Fast mode: %s", args.fast)
+    LOGGER.info("Crop X: %s", args.crop_x or "full")
+    LOGGER.info("Crop Y: %s", args.crop_y or "full")
     if args.orthogonal or args.orthogonal_center is not None:
-        print(f"Orthogonal center: {orthogonal_center}")
+        LOGGER.info("Orthogonal center: %s", orthogonal_center)
     else:
-        print(f"Axis: {args.axis}")
-        print(f"Slices: {slice_indices}")
-    print(f"Position mode: {args.position_mode}")
-    print("Static mode: False")
-    print(f"Difference colormap: {args.difference_colormap}")
+        LOGGER.info("Axis: %s", args.axis)
+        LOGGER.info("Slices: %s", slice_indices)
+    LOGGER.info("Position mode: %s", args.position_mode)
+    LOGGER.info("Static mode: False")
+    LOGGER.info("Difference colormap: %s", args.difference_colormap)
     if auto_follow:
-        print(f"Watching collection for newer reconstructions: {reference_dataset_root.parent}")
+        LOGGER.info("Watching collection for newer reconstructions: %s", reference_dataset_root.parent)
 
     last_seen_file = current_recon_file
     last_seen_dataset_root = current_dataset_root
@@ -831,17 +855,17 @@ def main() -> int:
                         args.crop_y,
                     )
                     if dataset_changed:
-                        print(f"Switched to new reconstruction dataset: {current_dataset_root}")
-                    print(f"Updated reconstruction dataset: {current_dataset_root}")
-                    print(f"Updated reconstruction file: {current_recon_file}")
+                        LOGGER.info("Switched to new reconstruction dataset: %s", current_dataset_root)
+                    LOGGER.info("Updated reconstruction dataset: %s", current_dataset_root)
+                    LOGGER.info("Updated reconstruction file: %s", current_recon_file)
                     last_seen_dataset_root = current_dataset_root
                     last_seen_file = current_recon_file
                 except Exception as exc:
-                    print(f"Failed to update from {current_recon_file}: {exc}")
+                    log_exception_summary(f"Failed to update from {current_recon_file}", exc)
 
             plt.pause(args.poll_interval)
     except KeyboardInterrupt:
-        print("\nStopped.")
+        LOGGER.info("Stopped by user.")
     finally:
         current_cache.close()
         baseline_cache.close()

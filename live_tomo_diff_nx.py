@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 import sys
 from pathlib import Path
@@ -15,6 +16,7 @@ import numpy as np
 
 POLL_INTERVAL = 2.0
 DEFAULT_FIGSIZE = (14, 8)
+LOGGER = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -75,7 +77,28 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use a diverging hot/cold colormap for the difference image.",
     )
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+        help="Logging verbosity. Default: INFO.",
+    )
     return parser.parse_args()
+
+
+def configure_logging(level_name: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, level_name),
+        format="%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+def log_exception_summary(message: str, exc: Exception) -> None:
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.exception("%s", message)
+    else:
+        LOGGER.error("%s: %s", message, exc)
 
 
 def prompt_path(prompt: str, allow_empty: bool = False) -> Path | None:
@@ -86,7 +109,7 @@ def prompt_path(prompt: str, allow_empty: bool = False) -> Path | None:
         path = Path(raw).expanduser()
         if path.exists():
             return path
-        print(f"Path not found: {path}")
+        LOGGER.warning("Path not found: %s", path)
 
 
 def prompt_projection_index(default: int = 0) -> int:
@@ -97,10 +120,10 @@ def prompt_projection_index(default: int = 0) -> int:
         try:
             value = int(raw)
         except ValueError:
-            print("Projection number must be an integer.")
+            LOGGER.warning("Projection number must be an integer.")
             continue
         if value < 0:
-            print("Projection number must be >= 0.")
+            LOGGER.warning("Projection number must be >= 0.")
             continue
         return value
 
@@ -311,6 +334,7 @@ def update_display(
 
 def main() -> int:
     args = parse_args()
+    configure_logging(args.log_level)
 
     reference_path = (
         Path(args.reference_path).expanduser()
@@ -336,15 +360,15 @@ def main() -> int:
     )
 
     if reference_path is None:
-        print("Reference path is required.")
+        LOGGER.error("Reference path is required.")
         return 1
     if projection_index < 0:
-        print("Projection index must be >= 0.")
+        LOGGER.error("Projection index must be >= 0.")
         return 1
     if args.fast:
         args.downsample = max(args.downsample, 4)
     if args.downsample < 1:
-        print("Downsample factor must be >= 1.")
+        LOGGER.error("Downsample factor must be >= 1.")
         return 1
 
     if args.hot_cold:
@@ -363,7 +387,7 @@ def main() -> int:
         second_count = projection_count(current_projection_file, args.dataset_path)
         second_image = load_projection(current_projection_file, projection_index, args.dataset_path, args.downsample)
     except Exception as exc:
-        print(f"Startup failed: {exc}")
+        log_exception_summary("Startup failed", exc)
         return 1
 
     diff_image = second_image - first_image
@@ -377,19 +401,19 @@ def main() -> int:
     ax.set_ylabel("Y")
     update_display(image_artist, ax, diff_image, reference_dataset_root, current_dataset_root)
 
-    print(f"Reference dataset: {reference_dataset_root}")
-    print(f"Reference projections file: {reference_projection_file}")
-    print(f"Reference projections available: {first_count}")
-    print(f"Starting comparison dataset: {current_dataset_root}")
-    print(f"Starting comparison file: {current_projection_file}")
-    print(f"Comparison projections available: {second_count}")
-    print(f"Using projection index: {projection_index}")
-    print(f"Position mode: {args.position_mode}")
-    print(f"Display downsample: {args.downsample}")
-    print(f"Fast mode: {args.fast}")
-    print(f"Colormap: {args.colormap}")
+    LOGGER.info("Reference dataset: %s", reference_dataset_root)
+    LOGGER.info("Reference projections file: %s", reference_projection_file)
+    LOGGER.info("Reference projections available: %s", first_count)
+    LOGGER.info("Starting comparison dataset: %s", current_dataset_root)
+    LOGGER.info("Starting comparison file: %s", current_projection_file)
+    LOGGER.info("Comparison projections available: %s", second_count)
+    LOGGER.info("Using projection index: %s", projection_index)
+    LOGGER.info("Position mode: %s", args.position_mode)
+    LOGGER.info("Display downsample: %s", args.downsample)
+    LOGGER.info("Fast mode: %s", args.fast)
+    LOGGER.info("Colormap: %s", args.colormap)
     if auto_follow:
-        print(f"Watching collection for newer tomography datasets: {reference_dataset_root.parent}")
+        LOGGER.info("Watching collection for newer tomography datasets: %s", reference_dataset_root.parent)
 
     last_seen_dataset = current_dataset_root
 
@@ -425,16 +449,16 @@ def main() -> int:
                         reference_dataset_root,
                         current_dataset_root,
                     )
-                    print(f"Updated comparison dataset: {current_dataset_root}")
-                    print(f"Updated comparison file: {current_projection_file}")
-                    print(f"Comparison projections available: {second_count}")
+                    LOGGER.info("Updated comparison dataset: %s", current_dataset_root)
+                    LOGGER.info("Updated comparison file: %s", current_projection_file)
+                    LOGGER.info("Comparison projections available: %s", second_count)
                     last_seen_dataset = current_dataset_root
                 except Exception as exc:
-                    print(f"Failed to update from {current_dataset_root}: {exc}")
+                    log_exception_summary(f"Failed to update from {current_dataset_root}", exc)
 
             plt.pause(args.poll_interval)
     except KeyboardInterrupt:
-        print("\nStopped.")
+        LOGGER.info("Stopped by user.")
 
     return 0
 

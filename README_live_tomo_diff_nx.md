@@ -66,3 +66,4 @@ python3 live_tomo_diff_nx.py \
 - `--fast` forces the display downsampling to at least `4`.
 - `--hot-cold` switches the difference image to the `coolwarm` colormap.
 - `--colormap` lets you choose any matplotlib colormap explicitly.
+- `--log-level DEBUG` enables full stack traces for startup or live-update failures.

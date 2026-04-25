@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,7 +63,28 @@ def parse_args() -> argparse.Namespace:
         default="gray",
         help="Matplotlib colormap. Default: gray.",
     )
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+        help="Logging verbosity. Default: INFO.",
+    )
     return parser.parse_args()
+
+
+def configure_logging(level_name: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, level_name),
+        format="%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+def log_exception_summary(message: str, exc: Exception) -> None:
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.exception("%s", message)
+    else:
+        LOGGER.error("%s: %s", message, exc)
 
 
 def prompt_path(prompt: str) -> Path:
@@ -68,7 +93,7 @@ def prompt_path(prompt: str) -> Path:
         path = Path(raw).expanduser()
         if path.is_file():
             return path
-        print(f"File not found: {path}")
+        LOGGER.warning("File not found: %s", path)
 
 
 def decode_scalar(value):
@@ -175,6 +200,7 @@ def extract_slice(volume: h5py.Dataset, axis: int, index: int) -> np.ndarray:
 
 def main() -> int:
     args = parse_args()
+    configure_logging(args.log_level)
 
     input_path = (
         Path(args.input_path).expanduser()
@@ -183,7 +209,7 @@ def main() -> int:
     )
 
     if not input_path.is_file():
-        print(f"File not found: {input_path}")
+        LOGGER.error("File not found: %s", input_path)
         return 1
 
     try:
@@ -192,13 +218,13 @@ def main() -> int:
             volume = read_dataset(h5_file, dataset_path)
             volume_shape = tuple(int(v) for v in volume.shape)
 
-            print(f"File: {input_path}")
-            print(f"Dataset: {dataset_path}")
-            print(f"Volume shape: {volume_shape}")
+            LOGGER.info("File: %s", input_path)
+            LOGGER.info("Dataset: %s", dataset_path)
+            LOGGER.info("Volume shape: %s", volume_shape)
 
             if args.orthogonal or args.orthogonal_center is not None:
                 center = parse_orthogonal_center(args.orthogonal_center, volume_shape)
-                print(f"Orthogonal center: {center}")
+                LOGGER.info("Orthogonal center: %s", center)
 
                 planes = [
                     ("XY", extract_slice(volume, 0, center[0])),
@@ -224,8 +250,8 @@ def main() -> int:
                 axis_size = int(volume.shape[args.axis])
                 slice_indices = parse_slice_indices(args.slices, axis_size, args.num_slices)
 
-                print(f"Axis: {args.axis}")
-                print(f"Slices: {slice_indices}")
+                LOGGER.info("Axis: %s", args.axis)
+                LOGGER.info("Slices: %s", slice_indices)
 
                 cols = min(2, len(slice_indices))
                 rows = (len(slice_indices) + cols - 1) // cols
@@ -247,7 +273,7 @@ def main() -> int:
             fig.tight_layout()
             plt.show()
     except Exception as exc:
-        print(f"Failed to open reconstruction: {exc}")
+        log_exception_summary("Failed to open reconstruction", exc)
         return 1
 
     return 0

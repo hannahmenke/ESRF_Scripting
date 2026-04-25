@@ -68,6 +68,7 @@ python3 live_tomo_diff.py --position-mode all
 - `--position-mode same` restricts auto-follow to the same position label as the reference dataset, for example `first_position`.
 - `--position-mode all` allows auto-follow to pick the newest projection dataset from any position in the collection.
 - If `--dataset-path` is not given, the script searches the scan file for an image stack dataset.
+- `--log-level DEBUG` enables full stack traces for startup or live-update failures.
 - For the `011_test` real dataset, it resolves:
   - `scan0004` in `011_test_first_position`
   - `scan0002` in later `011_test_first_position_*` datasets

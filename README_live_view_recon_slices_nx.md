@@ -137,3 +137,4 @@ python3 live_view_recon_slices_nx.py \
 - Cropping uses the displayed panel axes: `XY` uses `X/Y`, `XZ` uses `X/Z`, and `YZ` uses `Y/Z`.
 - `--fast` forces `--downsample 2` and, in orthogonal mode, shows only `XY` and `XZ`.
 - `--static` renders once and keeps the window open without polling for newer reconstructions.
+- `--log-level DEBUG` enables full stack traces for startup or live-update failures.

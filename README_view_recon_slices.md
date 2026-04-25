@@ -76,6 +76,7 @@ python3 view_recon_slices.py /path/to/reconstruction.h5 --dataset-path /entry/da
 - `--orthogonal-center a,b,c`: center indices for orthogonal views as axis0,axis1,axis2
 - `--dataset-path PATH`: exact HDF5 dataset path
 - `--colormap NAME`: matplotlib colormap, default `gray`
+- `--log-level DEBUG`: enable full stack traces for file or dataset-resolution failures
 
 ## Dependencies
 
