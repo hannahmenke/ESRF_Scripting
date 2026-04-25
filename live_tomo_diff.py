@@ -70,6 +70,18 @@ def parse_args() -> argparse.Namespace:
         help="Use a diverging hot/cold colormap for the difference image.",
     )
     parser.add_argument(
+        "--display-min",
+        type=float,
+        default=None,
+        help="Fixed minimum display value for the difference image. Default uses percentile scaling.",
+    )
+    parser.add_argument(
+        "--display-max",
+        type=float,
+        default=None,
+        help="Fixed maximum display value for the difference image. Default uses percentile scaling.",
+    )
+    parser.add_argument(
         "--log-level",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
         default="INFO",
@@ -402,12 +414,21 @@ def update_display(
     diff_image: np.ndarray,
     first_dataset_root: Path,
     second_dataset_root: Path,
+    display_min: float | None = None,
+    display_max: float | None = None,
 ) -> None:
     image_artist.set_data(diff_image)
 
-    diff_min, diff_max = np.percentile(diff_image, DISPLAY_PERCENTILES)
-    diff_min = float(diff_min)
-    diff_max = float(diff_max)
+    if display_min is not None or display_max is not None:
+        diff_min = float(display_min) if display_min is not None else float(np.min(diff_image))
+        diff_max = float(display_max) if display_max is not None else float(np.max(diff_image))
+    else:
+        diff_min, diff_max = np.percentile(diff_image, DISPLAY_PERCENTILES)
+        diff_min = float(diff_min)
+        diff_max = float(diff_max)
+        if diff_min == diff_max:
+            diff_min -= 0.5
+            diff_max += 0.5
     if diff_min == diff_max:
         diff_min = float(np.min(diff_image))
         diff_max = float(np.max(diff_image))
@@ -461,6 +482,9 @@ def main() -> int:
         return 1
     if args.hot_cold:
         args.colormap = "coolwarm"
+    if args.display_min is not None and args.display_max is not None and args.display_min >= args.display_max:
+        LOGGER.error("--display-min must be less than --display-max.")
+        return 1
 
     try:
         reference_dataset_root, reference_scan = resolve_input_target(reference_path)
@@ -487,7 +511,15 @@ def main() -> int:
     colorbar.set_label("Difference")
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
-    update_display(image_artist, ax, diff_image, reference_dataset_root, current_dataset_root)
+    update_display(
+        image_artist,
+        ax,
+        diff_image,
+        reference_dataset_root,
+        current_dataset_root,
+        args.display_min,
+        args.display_max,
+    )
 
     LOGGER.info("Reference dataset: %s", reference_dataset_root)
     LOGGER.info("Reference projection scan: %s", reference_scan)
@@ -498,6 +530,8 @@ def main() -> int:
     LOGGER.info("Using projection index: %s", projection_index)
     LOGGER.info("Position mode: %s", position_mode)
     LOGGER.info("Colormap: %s", args.colormap)
+    LOGGER.info("Display min: %s", args.display_min if args.display_min is not None else "auto")
+    LOGGER.info("Display max: %s", args.display_max if args.display_max is not None else "auto")
     if auto_follow:
         LOGGER.info("Watching collection for newer tomography datasets: %s", reference_dataset_root.parent)
 
@@ -529,6 +563,8 @@ def main() -> int:
                         diff_image,
                         reference_dataset_root,
                         current_dataset_root,
+                        args.display_min,
+                        args.display_max,
                     )
                     LOGGER.info("Updated comparison dataset: %s", current_dataset_root)
                     LOGGER.info("Updated comparison scan: %s", current_scan)
