@@ -97,6 +97,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Use a faster display mode: downsample by 2 and, in orthogonal mode, skip the slow YZ view.",
     )
+    parser.add_argument(
+        "--static",
+        action="store_true",
+        help="Render once and keep the window open without polling for updates.",
+    )
     return parser.parse_args()
 
 
@@ -617,6 +622,32 @@ def main() -> int:
         args.fast,
     )
 
+    if args.static:
+        plt.ioff()
+        print(f"Reference dataset: {reference_dataset_root}")
+        print(f"Reference reconstruction: {reference_recon_file}")
+        print(f"Reference volume shape: {reference_shape}")
+        print(f"Displayed dataset: {current_dataset_root}")
+        print(f"Displayed file: {current_recon_file}")
+        if baseline_recon_file is not None:
+            print(f"Difference baseline dataset: {baseline_dataset_root}")
+            print(f"Difference baseline file: {baseline_recon_file}")
+        print(f"Dataset path: {dataset_path}")
+        print(f"Display downsample: {args.downsample}")
+        print(f"Fast mode: {args.fast}")
+        if args.orthogonal or args.orthogonal_center is not None:
+            print(f"Orthogonal center: {orthogonal_center}")
+        else:
+            print(f"Axis: {args.axis}")
+            print(f"Slices: {slice_indices}")
+        print("Static mode: True")
+        try:
+            plt.show()
+        finally:
+            current_cache.close()
+            baseline_cache.close()
+        return 0
+
     print(f"Reference dataset: {reference_dataset_root}")
     print(f"Reference reconstruction: {reference_recon_file}")
     print(f"Reference volume shape: {reference_shape}")
@@ -634,6 +665,7 @@ def main() -> int:
         print(f"Axis: {args.axis}")
         print(f"Slices: {slice_indices}")
     print(f"Position mode: {args.position_mode}")
+    print("Static mode: False")
     if auto_follow:
         print(f"Watching collection for newer reconstructions: {reference_dataset_root.parent}")
 

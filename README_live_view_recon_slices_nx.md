@@ -22,6 +22,7 @@ When started, the script:
 5. displays them in a live matplotlib window
 6. if no comparison path is given, watches the collection for newer reconstructions
 7. can optionally show current-minus-baseline difference slices next to the live current slices
+8. can alternatively run in static mode and display a single reconstruction without polling
 
 ## How to run
 
@@ -62,6 +63,15 @@ python3 live_view_recon_slices_nx.py \
   --orthogonal
 ```
 
+Show one reconstruction once without live updates:
+
+```bash
+python3 live_view_recon_slices_nx.py \
+  --reference-path 0_39/039_Estaillades_WW_Drainage_first_position_0002 \
+  --orthogonal \
+  --static
+```
+
 Use the fast orthogonal mode:
 
 ```bash
@@ -100,3 +110,4 @@ python3 live_view_recon_slices_nx.py \
 - When `--difference-path` is used, the figure is arranged with current slices on the first row and difference slices on the second row.
 - `--downsample` reduces the displayed slice size at read time and is the easiest way to speed up large recon views.
 - `--fast` forces `--downsample 2` and, in orthogonal mode, shows only `XY` and `XZ`.
+- `--static` renders once and keeps the window open without polling for newer reconstructions.
