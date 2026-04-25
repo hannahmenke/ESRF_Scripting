@@ -314,6 +314,14 @@ def parse_orthogonal_center(raw_center: str | None, shape: tuple[int, int, int])
     return center
 
 
+def clamp_orthogonal_center(center: tuple[int, int, int], shape: tuple[int, int, int]) -> tuple[int, int, int]:
+    return tuple(min(max(index, 0), axis_size - 1) for index, axis_size in zip(center, shape))
+
+
+def clamp_slice_indices(indices: list[int], axis_size: int) -> list[int]:
+    return [min(max(index, 0), axis_size - 1) for index in indices]
+
+
 def extract_slice(volume: h5py.Dataset, axis: int, index: int) -> np.ndarray:
     if axis == 0:
         image = volume[index, :, :]
@@ -527,6 +535,13 @@ def load_volume_slices(
     return resolved_dataset_path, images
 
 
+def volume_shape(recon_file: Path, dataset_path: str | None) -> tuple[int, int, int]:
+    resolved_dataset_path = resolve_volume_dataset(recon_file, dataset_path)
+    with h5py.File(recon_file, "r") as h5_file:
+        volume = read_dataset(h5_file, resolved_dataset_path)
+        return tuple(int(v) for v in volume.shape)
+
+
 class VolumeCache:
     def __init__(self, dataset_path: str | None = None) -> None:
         self.dataset_path = dataset_path
@@ -732,7 +747,7 @@ def main() -> int:
     baseline_cache = VolumeCache(args.dataset_path)
     try:
         reference_dataset_root, reference_recon_file = resolve_reconstruction_target(reference_path, args.dataset_path)
-        _, reference_shape, slice_indices, orthogonal_center = load_volume_metadata(
+        _, reference_shape, configured_slice_indices, configured_orthogonal_center = load_volume_metadata(
             reference_recon_file,
             args.orthogonal,
             args.orthogonal_center,
@@ -744,6 +759,30 @@ def main() -> int:
         baseline_dataset_root = None
         baseline_recon_file = None
         baseline_images = None
+
+        current_dataset_root, current_recon_file, auto_follow = resolve_display_target(
+            reference_dataset_root,
+            reference_recon_file,
+            comparison_path,
+            args.position_mode,
+            args.dataset_path,
+        )
+        current_shape = volume_shape(current_recon_file, args.dataset_path)
+        if args.orthogonal or args.orthogonal_center is not None:
+            orthogonal_center = clamp_orthogonal_center(configured_orthogonal_center, current_shape)
+            slice_indices = []
+        else:
+            orthogonal_center = None
+            slice_indices = clamp_slice_indices(configured_slice_indices, current_shape[args.axis])
+        dataset_path, current_images = current_cache.load(
+            current_recon_file,
+            args.orthogonal or args.orthogonal_center is not None,
+            orthogonal_center,
+            args.axis,
+            slice_indices,
+            args.downsample,
+            args.fast,
+        )
         if args.show_difference:
             baseline_dataset_root, baseline_recon_file = reference_dataset_root, reference_recon_file
             _, baseline_images = baseline_cache.load(
@@ -755,23 +794,6 @@ def main() -> int:
                 args.downsample,
                 args.fast,
             )
-
-        current_dataset_root, current_recon_file, auto_follow = resolve_display_target(
-            reference_dataset_root,
-            reference_recon_file,
-            comparison_path,
-            args.position_mode,
-            args.dataset_path,
-        )
-        dataset_path, current_images = current_cache.load(
-            current_recon_file,
-            args.orthogonal or args.orthogonal_center is not None,
-            orthogonal_center,
-            args.axis,
-            slice_indices,
-            args.downsample,
-            args.fast,
-        )
     except Exception as exc:
         current_cache.close()
         baseline_cache.close()
@@ -857,6 +879,7 @@ def main() -> int:
     LOGGER.info("Reference dataset: %s", reference_dataset_root)
     LOGGER.info("Reference reconstruction: %s", reference_recon_file)
     LOGGER.info("Reference volume shape: %s", reference_shape)
+    LOGGER.info("Current volume shape: %s", current_shape)
     LOGGER.info("Starting display dataset: %s", current_dataset_root)
     LOGGER.info("Starting display file: %s", current_recon_file)
     if baseline_recon_file is not None:
@@ -902,6 +925,12 @@ def main() -> int:
             if current_recon_file != last_seen_file:
                 try:
                     dataset_changed = current_dataset_root != last_seen_dataset_root
+                    current_shape = volume_shape(current_recon_file, args.dataset_path)
+                    if args.orthogonal or args.orthogonal_center is not None:
+                        orthogonal_center = clamp_orthogonal_center(configured_orthogonal_center, current_shape)
+                        slice_indices = []
+                    else:
+                        slice_indices = clamp_slice_indices(configured_slice_indices, current_shape[args.axis])
                     _, current_images = current_cache.load(
                         current_recon_file,
                         args.orthogonal or args.orthogonal_center is not None,
@@ -911,6 +940,16 @@ def main() -> int:
                         args.downsample,
                         args.fast,
                     )
+                    if args.show_difference and baseline_recon_file is not None:
+                        _, baseline_images = baseline_cache.load(
+                            baseline_recon_file,
+                            args.orthogonal or args.orthogonal_center is not None,
+                            orthogonal_center,
+                            args.axis,
+                            slice_indices,
+                            args.downsample,
+                            args.fast,
+                        )
                     update_display(
                         axes[:display_count],
                         image_artists,
@@ -934,6 +973,7 @@ def main() -> int:
                     )
                     if dataset_changed:
                         LOGGER.info("Switched to new reconstruction dataset: %s", current_dataset_root)
+                    LOGGER.info("Current volume shape: %s", current_shape)
                     LOGGER.info("Updated reconstruction dataset: %s", current_dataset_root)
                     LOGGER.info("Updated reconstruction file: %s", current_recon_file)
                     last_seen_dataset_root = current_dataset_root
