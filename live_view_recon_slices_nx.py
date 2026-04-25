@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-POLL_INTERVAL = 10.0
+POLL_INTERVAL = 30.0
 DEFAULT_FIGSIZE = (18, 10)
 LOGGER = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
         "--poll-interval",
         type=float,
         default=POLL_INTERVAL,
-        help="Seconds between checks for a newer reconstruction. Default: 10.",
+        help="Seconds between checks for a newer reconstruction. Default: 30.",
     )
     parser.add_argument(
         "--colormap",
