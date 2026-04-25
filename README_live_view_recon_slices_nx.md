@@ -108,6 +108,15 @@ python3 live_view_recon_slices_nx.py \
   --hot-cold
 ```
 
+Crop the displayed view to a smaller region:
+
+```bash
+python3 live_view_recon_slices_nx.py \
+  --reference-path 0_39/039_Estaillades_WW_Drainage_first_position_0002 \
+  --orthogonal \
+  --crop 200:1200,300:1800
+```
+
 ## Notes
 
 - The script prefers the newest file under `reconstructed_volumes/`, and falls back to `reconstructed_slices/` if needed.
@@ -123,5 +132,7 @@ python3 live_view_recon_slices_nx.py \
 - `--hot-cold` switches the difference images to the `coolwarm` colormap.
 - `--difference-colormap` lets you choose any matplotlib colormap explicitly for the difference images.
 - `--downsample` reduces the displayed slice size at read time and is the easiest way to speed up large recon views.
+- `--crop y0:y1,x0:x1` crops the displayed images after downsampling.
+- `--crop-x` and `--crop-y` let you crop only one displayed axis.
 - `--fast` forces `--downsample 2` and, in orthogonal mode, shows only `XY` and `XZ`.
 - `--static` renders once and keeps the window open without polling for newer reconstructions.

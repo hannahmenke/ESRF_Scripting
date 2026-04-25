@@ -112,6 +112,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Render once and keep the window open without polling for updates.",
     )
+    parser.add_argument(
+        "--crop",
+        default=None,
+        help="Crop displayed images after downsampling as y_start:y_stop,x_start:x_stop.",
+    )
+    parser.add_argument(
+        "--crop-x",
+        default=None,
+        help="Crop displayed images along X after downsampling as start:stop.",
+    )
+    parser.add_argument(
+        "--crop-y",
+        default=None,
+        help="Crop displayed images along Y after downsampling as start:stop.",
+    )
     return parser.parse_args()
 
 
@@ -145,6 +160,53 @@ def downsample_image(image: np.ndarray, factor: int) -> np.ndarray:
     if factor <= 1:
         return image
     return image[::factor, ::factor]
+
+
+def parse_crop_range(raw_range: str | None, size: int, axis_name: str) -> tuple[int, int]:
+    if raw_range is None:
+        return 0, size
+
+    parts = raw_range.split(":", 1)
+    if len(parts) != 2:
+        raise RuntimeError(f"{axis_name} crop must be formatted as start:stop")
+
+    start_raw, stop_raw = parts
+    start = int(start_raw) if start_raw.strip() else 0
+    stop = int(stop_raw) if stop_raw.strip() else size
+
+    if start < 0:
+        start += size
+    if stop < 0:
+        stop += size
+
+    start = max(0, min(start, size))
+    stop = max(0, min(stop, size))
+    if start >= stop:
+        raise RuntimeError(f"{axis_name} crop must satisfy start < stop within 0:{size}")
+    return start, stop
+
+
+def parse_crop_spec(
+    crop: str | None,
+    crop_x: str | None,
+    crop_y: str | None,
+) -> tuple[str | None, str | None]:
+    parsed_crop_y = crop_y
+    parsed_crop_x = crop_x
+    if crop is not None:
+        parts = [part.strip() for part in crop.split(",", 1)]
+        if len(parts) != 2:
+            raise RuntimeError("--crop must be formatted as y_start:y_stop,x_start:x_stop")
+        if crop_y is not None or crop_x is not None:
+            raise RuntimeError("Use either --crop or --crop-x/--crop-y, not both")
+        parsed_crop_y, parsed_crop_x = parts
+    return parsed_crop_y, parsed_crop_x
+
+
+def crop_image(image: np.ndarray, crop_x: str | None, crop_y: str | None) -> np.ndarray:
+    y_start, y_stop = parse_crop_range(crop_y, image.shape[0], "Y")
+    x_start, x_stop = parse_crop_range(crop_x, image.shape[1], "X")
+    return image[y_start:y_stop, x_start:x_stop]
 
 
 def find_candidate_datasets(h5_file: h5py.File) -> list[str]:
@@ -473,6 +535,8 @@ def update_display(
     orthogonal_center: tuple[int, int, int] | None,
     baseline_images: list[np.ndarray] | None,
     fast: bool,
+    crop_x: str | None,
+    crop_y: str | None,
 ) -> None:
     labels: list[str] = []
     if orthogonal:
@@ -486,12 +550,12 @@ def update_display(
     panel_colormaps: list[str] = []
     for label, image in zip(labels, images):
         panel_labels.append(label)
-        panel_images.append(image)
+        panel_images.append(crop_image(image, crop_x, crop_y))
         panel_colormaps.append(colormap)
     if baseline_images is not None:
         for label, image, baseline in zip(labels, images, baseline_images):
             panel_labels.append(f"{label} difference")
-            panel_images.append(image - baseline)
+            panel_images.append(crop_image(image - baseline, crop_x, crop_y))
             panel_colormaps.append(difference_colormap)
 
     for ax, artist, label, image, panel_cmap in zip(axes, image_artists, panel_labels, panel_images, panel_colormaps):
@@ -551,6 +615,11 @@ def main() -> int:
         args.downsample = max(args.downsample, 2)
     if args.downsample < 1:
         print("Downsample factor must be >= 1.")
+        return 1
+    try:
+        args.crop_y, args.crop_x = parse_crop_spec(args.crop, args.crop_x, args.crop_y)
+    except Exception as exc:
+        print(f"Invalid crop settings: {exc}")
         return 1
     if args.hot_cold:
         args.difference_colormap = "coolwarm"
@@ -643,6 +712,8 @@ def main() -> int:
         orthogonal_center,
         baseline_images,
         args.fast,
+        args.crop_x,
+        args.crop_y,
     )
 
     if args.static:
@@ -658,6 +729,8 @@ def main() -> int:
         print(f"Dataset path: {dataset_path}")
         print(f"Display downsample: {args.downsample}")
         print(f"Fast mode: {args.fast}")
+        print(f"Crop X: {args.crop_x or 'full'}")
+        print(f"Crop Y: {args.crop_y or 'full'}")
         if args.orthogonal or args.orthogonal_center is not None:
             print(f"Orthogonal center: {orthogonal_center}")
         else:
@@ -683,6 +756,8 @@ def main() -> int:
     print(f"Dataset path: {dataset_path}")
     print(f"Display downsample: {args.downsample}")
     print(f"Fast mode: {args.fast}")
+    print(f"Crop X: {args.crop_x or 'full'}")
+    print(f"Crop Y: {args.crop_y or 'full'}")
     if args.orthogonal or args.orthogonal_center is not None:
         print(f"Orthogonal center: {orthogonal_center}")
     else:
@@ -738,6 +813,8 @@ def main() -> int:
                         orthogonal_center,
                         baseline_images,
                         args.fast,
+                        args.crop_x,
+                        args.crop_y,
                     )
                     if dataset_changed:
                         print(f"Switched to new reconstruction dataset: {current_dataset_root}")
