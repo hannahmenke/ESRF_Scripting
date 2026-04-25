@@ -444,7 +444,7 @@ def resolve_display_target(
 ) -> tuple[Path, Path, bool]:
     if second_path is not None:
         dataset_root, recon_file = resolve_reconstruction_target(second_path)
-        return dataset_root, recon_file, False
+        return dataset_root, recon_file, True
 
     return reference_dataset_root, reference_recon_file, True
 
