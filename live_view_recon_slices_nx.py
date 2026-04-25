@@ -564,14 +564,14 @@ def update_display(
     axes: list,
     image_artists: list,
     slice_indices: list[int],
-    images: list[np.ndarray],
+    current_images: list[np.ndarray],
     axis_index: int,
     title: str,
     colormap: str,
     difference_colormap: str,
     orthogonal: bool,
     orthogonal_center: tuple[int, int, int] | None,
-    baseline_images: list[np.ndarray] | None,
+    difference_images: list[np.ndarray] | None,
     fast: bool,
     crop_x: str | None,
     crop_y: str | None,
@@ -596,15 +596,15 @@ def update_display(
     panel_labels: list[str] = []
     panel_colormaps: list[str] = []
     panel_axis_labels: list[tuple[str, str]] = []
-    for label, image in zip(labels, images):
+    for label, image in zip(labels, current_images):
         panel_labels.append(label)
         panel_images.append(crop_image(image, crop_x, crop_y))
         panel_colormaps.append(colormap)
         panel_axis_labels.append(axis_labels[len(panel_axis_labels)])
-    if baseline_images is not None:
-        for label, image, baseline, axis_label in zip(labels, images, baseline_images, axis_labels):
+    if difference_images is not None:
+        for label, diff_image, axis_label in zip(labels, difference_images, axis_labels):
             panel_labels.append(f"{label} difference")
-            panel_images.append(crop_image(image - baseline, crop_x, crop_y))
+            panel_images.append(crop_image(diff_image, crop_x, crop_y))
             panel_colormaps.append(difference_colormap)
             panel_axis_labels.append(axis_label)
 
@@ -644,6 +644,15 @@ def make_display_title(
         f"reference: {reference_dataset_root.name} | {reference_recon_file.name}\n"
         f"current: {current_dataset_root.name} | {current_recon_file.name}"
     )
+
+
+def compute_difference_images(
+    current_images: list[np.ndarray],
+    reference_images: list[np.ndarray] | None,
+) -> list[np.ndarray] | None:
+    if reference_images is None:
+        return None
+    return [current - reference for current, reference in zip(current_images, reference_images)]
 
 
 def main() -> int:
@@ -791,7 +800,7 @@ def main() -> int:
         args.difference_colormap,
         args.orthogonal or args.orthogonal_center is not None,
         orthogonal_center,
-        baseline_images,
+        compute_difference_images(current_images, baseline_images),
         args.fast,
         args.crop_x,
         args.crop_y,
@@ -900,7 +909,7 @@ def main() -> int:
                         args.difference_colormap,
                         args.orthogonal or args.orthogonal_center is not None,
                         orthogonal_center,
-                        baseline_images,
+                        compute_difference_images(current_images, baseline_images),
                         args.fast,
                         args.crop_x,
                         args.crop_y,
