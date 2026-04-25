@@ -408,15 +408,27 @@ def is_reconstruction_file(path: Path, dataset_path: str | None = None) -> bool:
         return False
 
 
+def verify_complete_volume_read(volume: h5py.Dataset) -> None:
+    if not is_valid_volume_dataset(volume):
+        raise RuntimeError(f"Dataset is not a valid 3D reconstruction volume: shape={volume.shape}")
+
+    z_size, y_size, x_size = (int(size) for size in volume.shape)
+    sample_indices = lambda size: sorted({0, size // 2, size - 1})
+
+    for z_index in sample_indices(z_size):
+        _ = np.asarray(volume[z_index, :, :], dtype=np.float32)
+    for y_index in sample_indices(y_size):
+        _ = np.asarray(volume[:, y_index, :], dtype=np.float32)
+    for x_index in sample_indices(x_size):
+        _ = np.asarray(volume[:, :, x_index], dtype=np.float32)
+
+
 def is_readable_reconstruction_file(path: Path, dataset_path: str | None = None) -> bool:
     try:
         resolved_dataset_path = resolve_volume_dataset(path, dataset_path)
         with h5py.File(path, "r") as h5_file:
             volume = read_dataset(h5_file, resolved_dataset_path)
-            if not is_valid_volume_dataset(volume):
-                return False
-            z_index = min(max(int(volume.shape[0]) // 2, 0), int(volume.shape[0]) - 1)
-            _ = np.asarray(volume[z_index], dtype=np.float32)
+            verify_complete_volume_read(volume)
         return True
     except Exception:
         return False
