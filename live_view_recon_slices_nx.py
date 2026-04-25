@@ -670,6 +670,7 @@ def main() -> int:
         print(f"Watching collection for newer reconstructions: {reference_dataset_root.parent}")
 
     last_seen_file = current_recon_file
+    last_seen_dataset_root = current_dataset_root
 
     try:
         while plt.fignum_exists(fig.number):
@@ -689,6 +690,7 @@ def main() -> int:
 
             if current_recon_file != last_seen_file:
                 try:
+                    dataset_changed = current_dataset_root != last_seen_dataset_root
                     _, current_images = current_cache.load(
                         current_recon_file,
                         args.orthogonal or args.orthogonal_center is not None,
@@ -711,8 +713,11 @@ def main() -> int:
                         baseline_images,
                         args.fast,
                     )
+                    if dataset_changed:
+                        print(f"Switched to new reconstruction dataset: {current_dataset_root}")
                     print(f"Updated reconstruction dataset: {current_dataset_root}")
                     print(f"Updated reconstruction file: {current_recon_file}")
+                    last_seen_dataset_root = current_dataset_root
                     last_seen_file = current_recon_file
                 except Exception as exc:
                     print(f"Failed to update from {current_recon_file}: {exc}")
