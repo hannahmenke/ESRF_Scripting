@@ -144,6 +144,7 @@ python3 live_view_recon_slices_nx.py \
 - `--orthogonal-center a,b,c` selects the orthogonal intersection point as axis0,axis1,axis2.
 - `--show-difference` is retained for compatibility, but the difference row is enabled by default.
 - When `--show-difference` is used, the figure is arranged with current slices on the first row and difference slices on the second row.
+- The figure title explicitly shows both the reference dataset/file and the current dataset/file.
 - `--difference-path` is deprecated and rejected; use `--reference-path`, `--comparison-path`, and `--show-difference` instead.
 - `--hot-cold` switches the difference images to the `coolwarm` colormap.
 - `--difference-colormap` lets you choose any matplotlib colormap explicitly for the difference images.

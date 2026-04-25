@@ -627,6 +627,18 @@ def update_display(
     plt.pause(0.001)
 
 
+def make_display_title(
+    reference_dataset_root: Path,
+    reference_recon_file: Path,
+    current_dataset_root: Path,
+    current_recon_file: Path,
+) -> str:
+    return (
+        f"reference: {reference_dataset_root.name} | {reference_recon_file.name}\n"
+        f"current: {current_dataset_root.name} | {current_recon_file.name}"
+    )
+
+
 def main() -> int:
     args = parse_args()
     configure_logging(args.log_level)
@@ -761,7 +773,12 @@ def main() -> int:
         slice_indices,
         current_images,
         args.axis,
-        f"{current_dataset_root.name} | {current_recon_file.name}",
+        make_display_title(
+            reference_dataset_root,
+            reference_recon_file,
+            current_dataset_root,
+            current_recon_file,
+        ),
         args.colormap,
         args.difference_colormap,
         args.orthogonal or args.orthogonal_center is not None,
@@ -864,7 +881,12 @@ def main() -> int:
                         slice_indices,
                         current_images,
                         args.axis,
-                        f"{current_dataset_root.name} | {current_recon_file.name}",
+                        make_display_title(
+                            reference_dataset_root,
+                            reference_recon_file,
+                            current_dataset_root,
+                            current_recon_file,
+                        ),
                         args.colormap,
                         args.difference_colormap,
                         args.orthogonal or args.orthogonal_center is not None,
