@@ -130,6 +130,7 @@ python3 live_view_recon_slices_nx.py \
 - The script prefers the newest file under `reconstructed_volumes/`, and falls back to `reconstructed_slices/` if needed.
 - `--reference-path` is always the baseline/reference reconstruction.
 - `--comparison-path` is the current reconstruction to display; if omitted, the script auto-follows a newer matching dataset.
+- If `--comparison-path` is provided explicitly, the script automatically shows `current - reference`.
 - `--position-mode same` restricts auto-follow to datasets matching the same position label as the reference dataset.
 - `--position-mode all` allows auto-follow across all positions in the same collection directory.
 - If a dataset or reconstruction path that you explicitly pass does not contain a valid reconstruction volume, the script stops with a clear error.
@@ -138,6 +139,7 @@ python3 live_view_recon_slices_nx.py \
 - `--orthogonal` shows one XY/XZ/YZ triplet through the volume center.
 - `--orthogonal-center a,b,c` selects the orthogonal intersection point as axis0,axis1,axis2.
 - `--show-difference` adds a second panel set showing `current - reference`.
+- `--show-difference` is mainly useful in auto-follow mode; with an explicit `--comparison-path`, the difference row is enabled automatically.
 - When `--show-difference` is used, the figure is arranged with current slices on the first row and difference slices on the second row.
 - `--difference-path` is deprecated and rejected; use `--reference-path`, `--comparison-path`, and `--show-difference` instead.
 - `--hot-cold` switches the difference images to the `coolwarm` colormap.

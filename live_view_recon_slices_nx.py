@@ -671,6 +671,9 @@ def main() -> int:
             "and `--show-difference` to display current minus reference."
         )
         return 1
+    if comparison_path is not None and not args.show_difference:
+        LOGGER.info("Comparison path provided; enabling difference display automatically.")
+        args.show_difference = True
     if args.fast:
         args.downsample = max(args.downsample, 2)
     if args.downsample < 1:
