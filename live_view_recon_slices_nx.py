@@ -17,6 +17,7 @@ import numpy as np
 POLL_INTERVAL = 30.0
 DEFAULT_FIGSIZE = (18, 10)
 LOGGER = logging.getLogger(__name__)
+READABLE_RECON_CACHE: dict[tuple[str, int, int], bool] = {}
 
 
 def parse_args() -> argparse.Namespace:
@@ -413,22 +414,33 @@ def verify_complete_volume_read(volume: h5py.Dataset) -> None:
         raise RuntimeError(f"Dataset is not a valid 3D reconstruction volume: shape={volume.shape}")
 
     z_size, y_size, x_size = (int(size) for size in volume.shape)
-    sample_indices = lambda size: sorted({0, size // 2, size - 1})
+    z_indices = sorted({0, z_size // 2, z_size - 1})
 
-    for z_index in sample_indices(z_size):
+    for z_index in z_indices:
         _ = np.asarray(volume[z_index, :, :], dtype=np.float32)
-    for y_index in sample_indices(y_size):
-        _ = np.asarray(volume[:, y_index, :], dtype=np.float32)
-    for x_index in sample_indices(x_size):
-        _ = np.asarray(volume[:, :, x_index], dtype=np.float32)
+
+    corner_points = (
+        (0, 0, 0),
+        (z_size - 1, y_size - 1, x_size - 1),
+        (z_size // 2, y_size // 2, x_size // 2),
+    )
+    for z_index, y_index, x_index in corner_points:
+        _ = float(volume[z_index, y_index, x_index])
 
 
 def is_readable_reconstruction_file(path: Path, dataset_path: str | None = None) -> bool:
     try:
+        stat = path.stat()
+        cache_key = (str(path.resolve()), stat.st_mtime_ns, stat.st_size)
+        cached_result = READABLE_RECON_CACHE.get(cache_key)
+        if cached_result is not None:
+            return cached_result
+
         resolved_dataset_path = resolve_volume_dataset(path, dataset_path)
         with h5py.File(path, "r") as h5_file:
             volume = read_dataset(h5_file, resolved_dataset_path)
             verify_complete_volume_read(volume)
+        READABLE_RECON_CACHE[cache_key] = True
         return True
     except Exception:
         return False
