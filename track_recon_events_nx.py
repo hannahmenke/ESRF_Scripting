@@ -1,0 +1,1171 @@
+#!/usr/bin/env python3
+
+from __future__ import annotations
+
+import argparse
+import csv
+from datetime import datetime, timezone
+import logging
+import math
+import re
+import sqlite3
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import h5py
+import imageio.v2 as imageio
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+
+LOGGER = logging.getLogger(__name__)
+DEFAULT_TARGET_SAMPLE_COUNT = 1_000_000
+DEFAULT_THRESHOLD_SIGMA = 5.0
+DEFAULT_MAX_EVENTS = 100
+DEFAULT_MIN_EVENT_SIZE = 10
+DEFAULT_GIF_FPS = 2
+
+
+@dataclass
+class SliceComponent:
+    z_index: int
+    y_min: int
+    y_max: int
+    x_min: int
+    x_max: int
+    voxel_count: int
+    peak_abs_diff: float
+    peak_signed_diff: float
+    sum_abs_diff: float
+    sum_signed_diff: float
+    z_weighted_sum: float
+    y_weighted_sum: float
+    x_weighted_sum: float
+
+
+@dataclass
+class Event3D:
+    event_id: int
+    z_min: int
+    z_max: int
+    y_min: int
+    y_max: int
+    x_min: int
+    x_max: int
+    voxel_count: int
+    peak_abs_diff: float
+    peak_signed_diff: float
+    sum_abs_diff: float
+    sum_signed_diff: float
+    z_weighted_sum: float
+    y_weighted_sum: float
+    x_weighted_sum: float
+    last_z: int
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Track large reconstruction differences across an NX-style reconstructed time series."
+    )
+    parser.add_argument(
+        "--reference-path",
+        required=True,
+        help="Dataset directory or reconstruction HDF5 file used to identify the series and anchor the first stepwise comparison.",
+    )
+    parser.add_argument(
+        "--start-number",
+        type=int,
+        required=True,
+        help="First comparison sequence number to process. Unsuffixed dataset counts as 0.",
+    )
+    parser.add_argument(
+        "--stop-number",
+        type=int,
+        required=True,
+        help="Last comparison sequence number to process. Unsuffixed dataset counts as 0.",
+    )
+    parser.add_argument(
+        "--dataset-path",
+        default=None,
+        help="Exact HDF5 dataset path for the reconstruction volume.",
+    )
+    parser.add_argument(
+        "--output-db",
+        default="recon_event_tracker.sqlite",
+        help="SQLite database path for detected events. Default: recon_event_tracker.sqlite",
+    )
+    parser.add_argument(
+        "--threshold-sigma",
+        type=float,
+        default=DEFAULT_THRESHOLD_SIGMA,
+        help="Detection threshold as baseline_noise_sigma * value. Default: 5.0",
+    )
+    parser.add_argument(
+        "--absolute-threshold",
+        type=float,
+        default=None,
+        help="Absolute difference threshold for event detection. Overrides --threshold-sigma if provided.",
+    )
+    parser.add_argument(
+        "--min-event-size",
+        type=int,
+        default=DEFAULT_MIN_EVENT_SIZE,
+        help="Minimum voxel count for an event to be recorded. Default: 10",
+    )
+    parser.add_argument(
+        "--max-events",
+        type=int,
+        default=DEFAULT_MAX_EVENTS,
+        help="Maximum number of events to store per comparison image. Default: 100",
+    )
+    parser.add_argument(
+        "--noise-target-samples",
+        type=int,
+        default=DEFAULT_TARGET_SAMPLE_COUNT,
+        help="Approximate number of voxels to sample when estimating baseline noise. Default: 1000000",
+    )
+    parser.add_argument(
+        "--save-gifs",
+        action="store_true",
+        help="Save orthogonal timeseries GIFs alongside the SQLite/CSV outputs.",
+    )
+    parser.add_argument(
+        "--gif-labels",
+        action="store_true",
+        help="Overlay current and previous sequence numbers in the corner of GIF frames.",
+    )
+    parser.add_argument(
+        "--gif-planes",
+        default="xy,xz,yz",
+        help="Comma-separated planes to export for GIFs. Choices: xy,xz,yz. Default: xy,xz,yz",
+    )
+    parser.add_argument(
+        "--gif-mode",
+        choices=("raw", "diff", "both"),
+        default="diff",
+        help="Whether GIFs should show raw slices, difference slices, or both. Default: diff",
+    )
+    parser.add_argument(
+        "--orthogonal-center",
+        default=None,
+        help="Comma-separated z,y,x center indices for GIF slices. Defaults to the volume center.",
+    )
+    parser.add_argument(
+        "--gif-downsample",
+        type=int,
+        default=1,
+        help="Downsample factor for GIF frames. Default: 1.",
+    )
+    parser.add_argument(
+        "--gif-fps",
+        type=int,
+        default=DEFAULT_GIF_FPS,
+        help="Frames per second for GIF export. Default: 2.",
+    )
+    parser.add_argument(
+        "--log-level",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
+        default="INFO",
+        help="Logging verbosity. Default: INFO.",
+    )
+    return parser.parse_args()
+
+
+def configure_logging(level_name: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, level_name),
+        format="%(asctime)s | %(levelname)-8s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+def log_exception_summary(message: str, exc: Exception) -> None:
+    if LOGGER.isEnabledFor(logging.DEBUG):
+        LOGGER.exception("%s", message)
+    else:
+        LOGGER.error("%s: %s", message, exc)
+
+
+def decode_scalar(value):
+    if isinstance(value, bytes):
+        return value.decode()
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def read_dataset(h5_file: h5py.File, dataset_path: str) -> h5py.Dataset:
+    dataset = h5_file[dataset_path]
+    if not isinstance(dataset, h5py.Dataset):
+        raise RuntimeError(f"{dataset_path} is not a dataset")
+    return dataset
+
+
+def find_candidate_datasets(h5_file: h5py.File) -> list[str]:
+    candidates: list[str] = []
+
+    def visitor(name: str, obj: h5py.Dataset | h5py.Group) -> None:
+        if not isinstance(obj, h5py.Dataset):
+            return
+        if obj.ndim != 3:
+            return
+        if obj.dtype.kind not in "uif":
+            return
+
+        interpretation = decode_scalar(obj.attrs.get("interpretation"))
+        if interpretation in {"image", "volume"} or name.endswith("/data"):
+            candidates.append(name)
+            return
+
+        candidates.append(name)
+
+    h5_file.visititems(visitor)
+    candidates.sort()
+    return candidates
+
+
+def resolve_volume_dataset(input_path: Path, dataset_path: str | None) -> str:
+    with h5py.File(input_path, "r") as h5_file:
+        if dataset_path is not None:
+            dataset = read_dataset(h5_file, dataset_path)
+            if dataset.ndim != 3:
+                raise RuntimeError(f"{dataset_path} is not a 3D dataset")
+            return dataset_path
+
+        candidates = find_candidate_datasets(h5_file)
+        if not candidates:
+            raise RuntimeError(f"No numeric 3D datasets found in {input_path}")
+        return candidates[0]
+
+
+def is_dataset_directory(path: Path) -> bool:
+    return path.is_dir() and (path / "projections").is_dir()
+
+
+def resolve_dataset_root(path: Path) -> Path:
+    resolved = path.expanduser().resolve()
+    if resolved.is_dir():
+        return resolved
+    for parent in resolved.parents:
+        if is_dataset_directory(parent):
+            return parent
+    return resolved.parent
+
+
+def dataset_series_name(dataset_root: Path) -> str:
+    return re.sub(r"_\d{4}$", "", dataset_root.name)
+
+
+def dataset_sequence_number(dataset_root: Path) -> int:
+    match = re.search(r"_(\d{4})$", dataset_root.name)
+    if match:
+        return int(match.group(1))
+    return 0
+
+
+def candidate_reconstruction_files(dataset_root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    for base_name in ("reconstructed_volumes", "reconstructed_slices"):
+        base_dir = dataset_root / base_name
+        if not base_dir.is_dir():
+            continue
+        candidates.extend(path for path in base_dir.rglob("*.hdf5") if path.is_file())
+    return sorted(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def is_reconstruction_file(path: Path, dataset_path: str | None = None) -> bool:
+    lowered = path.name.lower()
+    if "histogram" in lowered:
+        return False
+
+    try:
+        resolve_volume_dataset(path, dataset_path)
+        return True
+    except Exception:
+        return False
+
+
+def find_latest_reconstruction_file(dataset_root: Path, dataset_path: str | None = None) -> Path:
+    candidates = candidate_reconstruction_files(dataset_root)
+    if not candidates:
+        raise RuntimeError(f"No reconstruction HDF5 files found in {dataset_root}")
+
+    valid_candidates = [path for path in candidates if is_reconstruction_file(path, dataset_path)]
+    if not valid_candidates:
+        raise RuntimeError(f"No valid reconstruction volume HDF5 files found in {dataset_root}")
+    return valid_candidates[-1]
+
+
+def resolve_reconstruction_target(raw_path: Path, dataset_path: str | None = None) -> tuple[Path, Path]:
+    path = raw_path.expanduser().resolve()
+    if not path.exists():
+        raise RuntimeError(f"Path not found: {path}")
+
+    if path.is_file() and path.suffix in {".hdf5", ".h5"}:
+        return resolve_dataset_root(path), path
+
+    dataset_root = resolve_dataset_root(path)
+    if not is_dataset_directory(dataset_root):
+        raise RuntimeError(f"{path} does not resolve to a tomography dataset directory")
+    return dataset_root, find_latest_reconstruction_file(dataset_root, dataset_path)
+
+
+def list_series_datasets(
+    reference_dataset_root: Path,
+    dataset_path: str | None,
+) -> list[tuple[int, Path, Path]]:
+    collection_dir = reference_dataset_root.parent
+    series_name = dataset_series_name(reference_dataset_root)
+    results: list[tuple[int, Path, Path]] = []
+
+    for dataset_dir in sorted(path for path in collection_dir.iterdir() if is_dataset_directory(path)):
+        if dataset_series_name(dataset_dir) != series_name:
+            continue
+        sequence_number = dataset_sequence_number(dataset_dir)
+        try:
+            recon_file = find_latest_reconstruction_file(dataset_dir, dataset_path)
+        except Exception as exc:
+            LOGGER.warning("Skipping %s: %s", dataset_dir, exc)
+            continue
+        results.append((sequence_number, dataset_dir, recon_file))
+
+    results.sort(key=lambda item: item[0])
+    return results
+
+
+def build_stepwise_comparisons(
+    reference_dataset_root: Path,
+    start_number: int,
+    stop_number: int,
+    dataset_path: str | None,
+) -> list[tuple[int, Path, Path, int, Path, Path]]:
+    all_datasets = list_series_datasets(reference_dataset_root, dataset_path)
+    if not all_datasets:
+        return []
+
+    low = min(start_number, stop_number)
+    high = max(start_number, stop_number)
+    comparisons: list[tuple[int, Path, Path, int, Path, Path]] = []
+
+    for index, (sequence_number, dataset_root, recon_file) in enumerate(all_datasets):
+        if sequence_number < low or sequence_number > high:
+            continue
+        if index == 0:
+            continue
+
+        previous_sequence, previous_dataset_root, previous_recon_file = all_datasets[index - 1]
+        comparisons.append(
+            (
+                sequence_number,
+                dataset_root,
+                recon_file,
+                previous_sequence,
+                previous_dataset_root,
+                previous_recon_file,
+            )
+        )
+
+    return comparisons
+
+
+def volume_shape(recon_file: Path, dataset_path: str) -> tuple[int, int, int]:
+    with h5py.File(recon_file, "r") as h5_file:
+        volume = read_dataset(h5_file, dataset_path)
+        return tuple(int(v) for v in volume.shape)
+
+
+def parse_orthogonal_center(raw_center: str | None, shape: tuple[int, int, int]) -> tuple[int, int, int]:
+    if raw_center:
+        values = [int(part.strip()) for part in raw_center.split(",") if part.strip()]
+        if len(values) != 3:
+            raise RuntimeError("--orthogonal-center must provide exactly 3 indices as z,y,x")
+        center = tuple(values)
+    else:
+        center = tuple(size // 2 for size in shape)
+
+    for axis, (index, axis_size) in enumerate(zip(center, shape)):
+        if index < 0 or index >= axis_size:
+            raise RuntimeError(f"Orthogonal center index {index} is out of range for axis {axis} with size {axis_size}")
+    return center
+
+
+def choose_sampling_step(shape: tuple[int, int, int], target_sample_count: int) -> int:
+    total_voxels = int(shape[0]) * int(shape[1]) * int(shape[2])
+    if target_sample_count <= 0:
+        return 1
+    step = int(math.ceil((total_voxels / target_sample_count) ** (1.0 / 3.0)))
+    return max(step, 1)
+
+
+def iter_diff_slices(reference_file: Path, comparison_file: Path, dataset_path: str):
+    with h5py.File(reference_file, "r") as ref_h5, h5py.File(comparison_file, "r") as cmp_h5:
+        ref_volume = read_dataset(ref_h5, dataset_path)
+        cmp_volume = read_dataset(cmp_h5, dataset_path)
+        if ref_volume.shape != cmp_volume.shape:
+            raise RuntimeError(
+                f"Volume shape mismatch: {reference_file} {tuple(ref_volume.shape)} vs "
+                f"{comparison_file} {tuple(cmp_volume.shape)}"
+            )
+
+        for z_index in range(int(ref_volume.shape[0])):
+            ref_slice = np.asarray(ref_volume[z_index], dtype=np.float32)
+            cmp_slice = np.asarray(cmp_volume[z_index], dtype=np.float32)
+            yield z_index, cmp_slice - ref_slice
+
+
+def load_orthogonal_views(
+    recon_file: Path,
+    dataset_path: str,
+    center: tuple[int, int, int],
+    downsample: int,
+) -> dict[str, np.ndarray]:
+    with h5py.File(recon_file, "r") as h5_file:
+        volume = read_dataset(h5_file, dataset_path)
+        z_index, y_index, x_index = center
+        views = {
+            "xy": np.asarray(volume[z_index, ::downsample, ::downsample], dtype=np.float32),
+            "xz": np.asarray(volume[::downsample, y_index, ::downsample], dtype=np.float32),
+            "yz": np.asarray(volume[::downsample, ::downsample, x_index], dtype=np.float32),
+        }
+    return views
+
+
+def normalize_frame(image: np.ndarray) -> np.ndarray:
+    image = np.asarray(image, dtype=np.float32)
+    finite = np.isfinite(image)
+    if not np.any(finite):
+        return np.zeros(image.shape, dtype=np.uint8)
+    image = np.where(finite, image, 0.0)
+    low, high = np.percentile(image, (1.0, 99.0))
+    if float(low) == float(high):
+        low = float(np.min(image))
+        high = float(np.max(image))
+    if float(low) == float(high):
+        return np.zeros(image.shape, dtype=np.uint8)
+    scaled = np.clip((image - low) / (high - low), 0.0, 1.0)
+    return (scaled * 255.0).astype(np.uint8)
+
+
+def annotate_frame(image: np.ndarray, text: str) -> np.ndarray:
+    pil_image = Image.fromarray(image, mode="L").convert("RGB")
+    draw = ImageDraw.Draw(pil_image, "RGBA")
+    font = ImageFont.load_default()
+    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+    padding = 4
+    box = (
+        8,
+        8,
+        8 + (right - left) + 2 * padding,
+        8 + (bottom - top) + 2 * padding,
+    )
+    draw.rectangle(box, fill=(0, 0, 0, 160))
+    draw.text((8 + padding, 8 + padding), text, fill=(255, 255, 255, 255), font=font)
+    return np.asarray(pil_image)
+
+
+def save_timeseries_gifs(
+    comparisons: list[tuple[int, Path, Path, int, Path, Path]],
+    dataset_path: str,
+    output_db: Path,
+    center: tuple[int, int, int],
+    planes: list[str],
+    mode: str,
+    downsample: int,
+    fps: int,
+    labels: bool,
+) -> list[Path]:
+    frame_sets: dict[str, list[np.ndarray]] = {}
+    output_paths: list[Path] = []
+
+    for sequence_number, dataset_root, recon_file, previous_sequence, previous_dataset_root, previous_recon_file in comparisons:
+        current_views = load_orthogonal_views(recon_file, dataset_path, center, downsample)
+        previous_views = load_orthogonal_views(previous_recon_file, dataset_path, center, downsample)
+        label = f"#{sequence_number:04d} prev #{previous_sequence:04d}"
+
+        for plane in planes:
+            if mode in {"raw", "both"}:
+                key = f"{plane}_raw"
+                frame = normalize_frame(current_views[plane])
+                if labels:
+                    frame = annotate_frame(frame, label)
+                frame_sets.setdefault(key, []).append(frame)
+            if mode in {"diff", "both"}:
+                key = f"{plane}_diff"
+                diff_view = current_views[plane] - previous_views[plane]
+                frame = normalize_frame(diff_view)
+                if labels:
+                    frame = annotate_frame(frame, label)
+                frame_sets.setdefault(key, []).append(frame)
+
+    for key, frames in frame_sets.items():
+        output_path = output_db.with_name(f"{output_db.stem}_{key}.gif")
+        imageio.mimsave(output_path, frames, duration=1.0 / max(fps, 1))
+        output_paths.append(output_path)
+    return output_paths
+
+
+def estimate_baseline_sigma(
+    reference_file: Path,
+    comparison_file: Path,
+    dataset_path: str,
+    target_sample_count: int,
+) -> float:
+    shape = volume_shape(reference_file, dataset_path)
+    step = choose_sampling_step(shape, target_sample_count)
+    samples: list[np.ndarray] = []
+    LOGGER.info("Estimating baseline noise with sampling step %s", step)
+
+    for z_index, diff_slice in iter_diff_slices(reference_file, comparison_file, dataset_path):
+        if z_index % step != 0:
+            continue
+        samples.append(diff_slice[::step, ::step].ravel())
+
+    if not samples:
+        raise RuntimeError("No baseline samples were collected")
+
+    sample = np.concatenate(samples).astype(np.float32, copy=False)
+    median = float(np.median(sample))
+    mad = float(np.median(np.abs(sample - median)))
+    sigma = mad / 0.6744897501960817 if mad > 0 else float(np.std(sample))
+    if not math.isfinite(sigma) or sigma <= 0:
+        raise RuntimeError("Baseline noise estimate is not positive")
+    return sigma
+
+
+def find_slice_components(mask: np.ndarray, diff_slice: np.ndarray, z_index: int) -> list[SliceComponent]:
+    visited = np.zeros(mask.shape, dtype=bool)
+    height, width = mask.shape
+    components: list[SliceComponent] = []
+
+    active_positions = np.argwhere(mask)
+    for start_y, start_x in active_positions:
+        if visited[start_y, start_x]:
+            continue
+
+        stack = [(int(start_y), int(start_x))]
+        visited[start_y, start_x] = True
+        y_min = y_max = int(start_y)
+        x_min = x_max = int(start_x)
+        voxel_count = 0
+        peak_abs_diff = 0.0
+        peak_signed_diff = 0.0
+        sum_abs_diff = 0.0
+        sum_signed_diff = 0.0
+        z_weighted_sum = 0.0
+        y_weighted_sum = 0.0
+        x_weighted_sum = 0.0
+
+        while stack:
+            y, x = stack.pop()
+            signed_value = float(diff_slice[y, x])
+            value = abs(signed_value)
+            voxel_count += 1
+            if value > peak_abs_diff:
+                peak_abs_diff = value
+                peak_signed_diff = signed_value
+            sum_abs_diff += value
+            sum_signed_diff += signed_value
+            z_weighted_sum += float(z_index)
+            y_weighted_sum += float(y)
+            x_weighted_sum += float(x)
+            y_min = min(y_min, y)
+            y_max = max(y_max, y)
+            x_min = min(x_min, x)
+            x_max = max(x_max, x)
+
+            for ny in range(max(0, y - 1), min(height, y + 2)):
+                for nx in range(max(0, x - 1), min(width, x + 2)):
+                    if not mask[ny, nx] or visited[ny, nx]:
+                        continue
+                    visited[ny, nx] = True
+                    stack.append((ny, nx))
+
+        components.append(
+            SliceComponent(
+                z_index=z_index,
+                y_min=y_min,
+                y_max=y_max,
+                x_min=x_min,
+                x_max=x_max,
+                voxel_count=voxel_count,
+                peak_abs_diff=peak_abs_diff,
+                peak_signed_diff=peak_signed_diff,
+                sum_abs_diff=sum_abs_diff,
+                sum_signed_diff=sum_signed_diff,
+                z_weighted_sum=z_weighted_sum,
+                y_weighted_sum=y_weighted_sum,
+                x_weighted_sum=x_weighted_sum,
+            )
+        )
+
+    return components
+
+
+def bboxes_touch(a: Event3D, b: SliceComponent) -> bool:
+    return not (
+        a.y_max + 1 < b.y_min
+        or b.y_max + 1 < a.y_min
+        or a.x_max + 1 < b.x_min
+        or b.x_max + 1 < a.x_min
+    )
+
+
+def merge_events(target: Event3D, source: Event3D) -> None:
+    target.z_min = min(target.z_min, source.z_min)
+    target.z_max = max(target.z_max, source.z_max)
+    target.y_min = min(target.y_min, source.y_min)
+    target.y_max = max(target.y_max, source.y_max)
+    target.x_min = min(target.x_min, source.x_min)
+    target.x_max = max(target.x_max, source.x_max)
+    target.voxel_count += source.voxel_count
+    if source.peak_abs_diff > target.peak_abs_diff:
+        target.peak_abs_diff = source.peak_abs_diff
+        target.peak_signed_diff = source.peak_signed_diff
+    target.sum_abs_diff += source.sum_abs_diff
+    target.sum_signed_diff += source.sum_signed_diff
+    target.z_weighted_sum += source.z_weighted_sum
+    target.y_weighted_sum += source.y_weighted_sum
+    target.x_weighted_sum += source.x_weighted_sum
+    target.last_z = max(target.last_z, source.last_z)
+
+
+def absorb_component(event: Event3D, component: SliceComponent) -> None:
+    event.z_min = min(event.z_min, component.z_index)
+    event.z_max = max(event.z_max, component.z_index)
+    event.y_min = min(event.y_min, component.y_min)
+    event.y_max = max(event.y_max, component.y_max)
+    event.x_min = min(event.x_min, component.x_min)
+    event.x_max = max(event.x_max, component.x_max)
+    event.voxel_count += component.voxel_count
+    if component.peak_abs_diff > event.peak_abs_diff:
+        event.peak_abs_diff = component.peak_abs_diff
+        event.peak_signed_diff = component.peak_signed_diff
+    event.sum_abs_diff += component.sum_abs_diff
+    event.sum_signed_diff += component.sum_signed_diff
+    event.z_weighted_sum += component.z_weighted_sum
+    event.y_weighted_sum += component.y_weighted_sum
+    event.x_weighted_sum += component.x_weighted_sum
+    event.last_z = component.z_index
+
+
+def event_centroid(event: Event3D) -> tuple[float, float, float]:
+    denominator = max(event.voxel_count, 1)
+    return (
+        event.z_weighted_sum / denominator,
+        event.y_weighted_sum / denominator,
+        event.x_weighted_sum / denominator,
+    )
+
+
+def detect_events_for_comparison(
+    reference_file: Path,
+    comparison_file: Path,
+    dataset_path: str,
+    threshold_value: float,
+    min_event_size: int,
+) -> tuple[list[Event3D], float]:
+    all_events: list[Event3D] = []
+    active_events: dict[int, Event3D] = {}
+    next_event_id = 1
+    max_abs_diff = 0.0
+
+    for z_index, diff_slice in iter_diff_slices(reference_file, comparison_file, dataset_path):
+        abs_slice = np.abs(diff_slice)
+        max_abs_diff = max(max_abs_diff, float(np.max(abs_slice)))
+        mask = abs_slice >= threshold_value
+        components = find_slice_components(mask, diff_slice, z_index)
+        current_active_ids: set[int] = set()
+
+        for component in components:
+            matching_ids = [
+                event_id
+                for event_id, event in active_events.items()
+                if event.last_z == z_index - 1 and bboxes_touch(event, component)
+            ]
+
+            if not matching_ids:
+                event = Event3D(
+                    event_id=next_event_id,
+                    z_min=component.z_index,
+                    z_max=component.z_index,
+                    y_min=component.y_min,
+                    y_max=component.y_max,
+                    x_min=component.x_min,
+                    x_max=component.x_max,
+                    voxel_count=0,
+                    peak_abs_diff=0.0,
+                    peak_signed_diff=0.0,
+                    sum_abs_diff=0.0,
+                    sum_signed_diff=0.0,
+                    z_weighted_sum=0.0,
+                    y_weighted_sum=0.0,
+                    x_weighted_sum=0.0,
+                    last_z=component.z_index,
+                )
+                absorb_component(event, component)
+                active_events[event.event_id] = event
+                current_active_ids.add(event.event_id)
+                next_event_id += 1
+                continue
+
+            primary_id = matching_ids[0]
+            primary_event = active_events[primary_id]
+            for merge_id in matching_ids[1:]:
+                if merge_id == primary_id or merge_id not in active_events:
+                    continue
+                merge_events(primary_event, active_events[merge_id])
+                del active_events[merge_id]
+                current_active_ids.discard(merge_id)
+            absorb_component(primary_event, component)
+            current_active_ids.add(primary_id)
+
+        finished_ids = [event_id for event_id in active_events if event_id not in current_active_ids]
+        for event_id in finished_ids:
+            all_events.append(active_events.pop(event_id))
+
+    all_events.extend(active_events.values())
+    filtered_events = [event for event in all_events if event.voxel_count >= min_event_size]
+    filtered_events.sort(key=lambda event: event.peak_abs_diff, reverse=True)
+    return filtered_events, max_abs_diff
+
+
+def initialize_database(db_path: Path) -> sqlite3.Connection:
+    connection = sqlite3.connect(db_path)
+    connection.execute("PRAGMA journal_mode=WAL")
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            reference_path TEXT NOT NULL,
+            reference_dataset_root TEXT NOT NULL,
+            reference_reconstruction_file TEXT NOT NULL,
+            dataset_path TEXT NOT NULL,
+            start_number INTEGER NOT NULL,
+            stop_number INTEGER NOT NULL,
+            baseline_sigma REAL NOT NULL,
+            threshold_sigma REAL NOT NULL,
+            threshold_value REAL NOT NULL,
+            min_event_size INTEGER NOT NULL,
+            max_events INTEGER NOT NULL
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS comparisons (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id INTEGER NOT NULL,
+            sequence_number INTEGER NOT NULL,
+            previous_sequence_number INTEGER NOT NULL,
+            previous_dataset_root TEXT NOT NULL,
+            previous_reconstruction_file TEXT NOT NULL,
+            previous_reconstruction_mtime TEXT,
+            dataset_root TEXT NOT NULL,
+            reconstruction_file TEXT NOT NULL,
+            reconstruction_mtime TEXT,
+            detected_event_count INTEGER NOT NULL,
+            stored_event_count INTEGER NOT NULL,
+            max_abs_diff REAL NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES runs(id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            comparison_id INTEGER NOT NULL,
+            event_rank INTEGER NOT NULL,
+            voxel_count INTEGER NOT NULL,
+            peak_abs_diff REAL NOT NULL,
+            peak_signed_diff REAL NOT NULL,
+            mean_abs_diff REAL NOT NULL,
+            mean_signed_diff REAL NOT NULL,
+            z_centroid REAL NOT NULL,
+            y_centroid REAL NOT NULL,
+            x_centroid REAL NOT NULL,
+            z_min INTEGER NOT NULL,
+            z_max INTEGER NOT NULL,
+            y_min INTEGER NOT NULL,
+            y_max INTEGER NOT NULL,
+            x_min INTEGER NOT NULL,
+            x_max INTEGER NOT NULL,
+            FOREIGN KEY (comparison_id) REFERENCES comparisons(id)
+        )
+        """
+    )
+    existing_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(comparisons)")
+    }
+    if "previous_reconstruction_mtime" not in existing_columns:
+        connection.execute("ALTER TABLE comparisons ADD COLUMN previous_reconstruction_mtime TEXT")
+    if "reconstruction_mtime" not in existing_columns:
+        connection.execute("ALTER TABLE comparisons ADD COLUMN reconstruction_mtime TEXT")
+    connection.commit()
+    return connection
+
+
+def file_mtime_iso(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+
+
+def insert_run(
+    connection: sqlite3.Connection,
+    reference_path: Path,
+    reference_dataset_root: Path,
+    reference_recon_file: Path,
+    dataset_path: str,
+    args: argparse.Namespace,
+    baseline_sigma: float,
+    threshold_value: float,
+) -> int:
+    cursor = connection.execute(
+        """
+        INSERT INTO runs (
+            reference_path,
+            reference_dataset_root,
+            reference_reconstruction_file,
+            dataset_path,
+            start_number,
+            stop_number,
+            baseline_sigma,
+            threshold_sigma,
+            threshold_value,
+            min_event_size,
+            max_events
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(reference_path),
+            str(reference_dataset_root),
+            str(reference_recon_file),
+            dataset_path,
+            args.start_number,
+            args.stop_number,
+            baseline_sigma,
+            args.threshold_sigma,
+            threshold_value,
+            args.min_event_size,
+            args.max_events,
+        ),
+    )
+    connection.commit()
+    return int(cursor.lastrowid)
+
+
+def insert_comparison_result(
+    connection: sqlite3.Connection,
+    run_id: int,
+    sequence_number: int,
+    previous_sequence_number: int,
+    previous_dataset_root: Path,
+    previous_recon_file: Path,
+    dataset_root: Path,
+    recon_file: Path,
+    events: list[Event3D],
+    stored_events: list[Event3D],
+    max_abs_diff: float,
+) -> None:
+    cursor = connection.execute(
+        """
+        INSERT INTO comparisons (
+            run_id,
+            sequence_number,
+            previous_sequence_number,
+            previous_dataset_root,
+            previous_reconstruction_file,
+            previous_reconstruction_mtime,
+            dataset_root,
+            reconstruction_file,
+            reconstruction_mtime,
+            detected_event_count,
+            stored_event_count,
+            max_abs_diff
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id,
+            sequence_number,
+            previous_sequence_number,
+            str(previous_dataset_root),
+            str(previous_recon_file),
+            file_mtime_iso(previous_recon_file),
+            str(dataset_root),
+            str(recon_file),
+            file_mtime_iso(recon_file),
+            len(events),
+            len(stored_events),
+            max_abs_diff,
+        ),
+    )
+    comparison_id = int(cursor.lastrowid)
+
+    for rank, event in enumerate(stored_events, start=1):
+        z_centroid, y_centroid, x_centroid = event_centroid(event)
+        connection.execute(
+            """
+            INSERT INTO events (
+                comparison_id,
+                event_rank,
+                voxel_count,
+                peak_abs_diff,
+                peak_signed_diff,
+                mean_abs_diff,
+                mean_signed_diff,
+                z_centroid,
+                y_centroid,
+                x_centroid,
+                z_min,
+                z_max,
+                y_min,
+                y_max,
+                x_min,
+                x_max
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                comparison_id,
+                rank,
+                event.voxel_count,
+                event.peak_abs_diff,
+                event.peak_signed_diff,
+                event.sum_abs_diff / max(event.voxel_count, 1),
+                event.sum_signed_diff / max(event.voxel_count, 1),
+                z_centroid,
+                y_centroid,
+                x_centroid,
+                event.z_min,
+                event.z_max,
+                event.y_min,
+                event.y_max,
+                event.x_min,
+                event.x_max,
+            ),
+        )
+    connection.commit()
+
+
+def export_events_csv(connection: sqlite3.Connection, run_id: int, output_db: Path) -> Path:
+    output_csv = output_db.with_suffix(".csv")
+    rows = connection.execute(
+        """
+        SELECT
+            c.sequence_number,
+            c.previous_sequence_number,
+            c.dataset_root,
+            c.previous_dataset_root,
+            c.reconstruction_file,
+            c.previous_reconstruction_file,
+            c.reconstruction_mtime,
+            c.previous_reconstruction_mtime,
+            e.event_rank,
+            e.voxel_count,
+            e.peak_abs_diff,
+            e.peak_signed_diff,
+            e.mean_abs_diff,
+            e.mean_signed_diff,
+            e.z_centroid,
+            e.y_centroid,
+            e.x_centroid,
+            e.z_min,
+            e.z_max,
+            e.y_min,
+            e.y_max,
+            e.x_min,
+            e.x_max
+        FROM events e
+        JOIN comparisons c ON c.id = e.comparison_id
+        WHERE c.run_id = ?
+        ORDER BY c.sequence_number, e.event_rank
+        """,
+        (run_id,),
+    )
+    fieldnames = [
+        "sequence_number",
+        "previous_sequence_number",
+        "dataset_root",
+        "previous_dataset_root",
+        "reconstruction_file",
+        "previous_reconstruction_file",
+        "reconstruction_mtime",
+        "previous_reconstruction_mtime",
+        "event_rank",
+        "voxel_count",
+        "peak_abs_diff",
+        "peak_signed_diff",
+        "mean_abs_diff",
+        "mean_signed_diff",
+        "z_centroid",
+        "y_centroid",
+        "x_centroid",
+        "z_min",
+        "z_max",
+        "y_min",
+        "y_max",
+        "x_min",
+        "x_max",
+    ]
+    with output_csv.open("w", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(fieldnames)
+        writer.writerows(rows)
+    return output_csv
+
+
+def main() -> int:
+    args = parse_args()
+    configure_logging(args.log_level)
+
+    if args.threshold_sigma <= 0:
+        LOGGER.error("--threshold-sigma must be > 0")
+        return 1
+    if args.absolute_threshold is not None and args.absolute_threshold <= 0:
+        LOGGER.error("--absolute-threshold must be > 0")
+        return 1
+    if args.min_event_size <= 0:
+        LOGGER.error("--min-event-size must be > 0")
+        return 1
+    if args.max_events <= 0:
+        LOGGER.error("--max-events must be > 0")
+        return 1
+    if args.gif_downsample <= 0:
+        LOGGER.error("--gif-downsample must be > 0")
+        return 1
+    if args.gif_fps <= 0:
+        LOGGER.error("--gif-fps must be > 0")
+        return 1
+
+    reference_path = Path(args.reference_path).expanduser()
+    output_db = Path(args.output_db).expanduser().resolve()
+
+    try:
+        reference_dataset_root, reference_recon_file = resolve_reconstruction_target(reference_path, args.dataset_path)
+        dataset_path = resolve_volume_dataset(reference_recon_file, args.dataset_path)
+        comparisons = build_stepwise_comparisons(
+            reference_dataset_root,
+            args.start_number,
+            args.stop_number,
+            dataset_path,
+        )
+        if not comparisons:
+            raise RuntimeError("No stepwise comparison reconstructions found in the requested range")
+
+        first_sequence, first_dataset_root, first_recon_file, first_previous_sequence, first_previous_dataset_root, first_previous_recon_file = comparisons[0]
+        center = parse_orthogonal_center(args.orthogonal_center, volume_shape(first_recon_file, dataset_path))
+        requested_planes = [part.strip().lower() for part in args.gif_planes.split(",") if part.strip()]
+        valid_planes = {"xy", "xz", "yz"}
+        if any(plane not in valid_planes for plane in requested_planes):
+            raise RuntimeError(f"--gif-planes must contain only {sorted(valid_planes)}")
+        LOGGER.info("Series anchor dataset: %s", reference_dataset_root)
+        LOGGER.info("Series anchor reconstruction: %s", reference_recon_file)
+        LOGGER.info("Dataset path: %s", dataset_path)
+        LOGGER.info(
+            "First stepwise comparison for baseline noise: #%04d %s minus #%04d %s",
+            first_sequence,
+            first_dataset_root,
+            first_previous_sequence,
+            first_previous_dataset_root,
+        )
+
+        baseline_sigma = estimate_baseline_sigma(
+            first_previous_recon_file,
+            first_recon_file,
+            dataset_path,
+            args.noise_target_samples,
+        )
+        if args.absolute_threshold is not None:
+            threshold_value = float(args.absolute_threshold)
+            LOGGER.info("Baseline noise sigma: %.6g", baseline_sigma)
+            LOGGER.info("Detection threshold: %.6g (absolute override)", threshold_value)
+        else:
+            threshold_value = baseline_sigma * args.threshold_sigma
+            LOGGER.info("Baseline noise sigma: %.6g", baseline_sigma)
+            LOGGER.info("Detection threshold: %.6g", threshold_value)
+
+        connection = initialize_database(output_db)
+        try:
+            run_id = insert_run(
+                connection,
+                reference_path.resolve(),
+                reference_dataset_root,
+                reference_recon_file,
+                dataset_path,
+                args,
+                baseline_sigma,
+                threshold_value,
+            )
+
+            for (
+                sequence_number,
+                dataset_root,
+                recon_file,
+                previous_sequence,
+                previous_dataset_root,
+                previous_recon_file,
+            ) in comparisons:
+                LOGGER.info(
+                    "Processing stepwise comparison #%04d: %s minus #%04d: %s",
+                    sequence_number,
+                    dataset_root,
+                    previous_sequence,
+                    previous_dataset_root,
+                )
+                events, max_abs_diff = detect_events_for_comparison(
+                    previous_recon_file,
+                    recon_file,
+                    dataset_path,
+                    threshold_value,
+                    args.min_event_size,
+                )
+                stored_events = events[: args.max_events]
+                insert_comparison_result(
+                    connection,
+                    run_id,
+                    sequence_number,
+                    previous_sequence,
+                    previous_dataset_root,
+                    previous_recon_file,
+                    dataset_root,
+                    recon_file,
+                    events,
+                    stored_events,
+                    max_abs_diff,
+                )
+                LOGGER.info(
+                    "Recorded %s events (%s stored) for #%04d, max abs diff %.6g",
+                    len(events),
+                    len(stored_events),
+                    sequence_number,
+                    max_abs_diff,
+                )
+            output_csv = export_events_csv(connection, run_id, output_db)
+            LOGGER.info("CSV summary written to %s", output_csv)
+            if args.save_gifs:
+                gif_paths = save_timeseries_gifs(
+                    comparisons,
+                    dataset_path,
+                    output_db,
+                    center,
+                    requested_planes,
+                    args.gif_mode,
+                    args.gif_downsample,
+                    args.gif_fps,
+                    args.gif_labels,
+                )
+                for gif_path in gif_paths:
+                    LOGGER.info("GIF written to %s", gif_path)
+        finally:
+            connection.close()
+    except Exception as exc:
+        log_exception_summary("Event tracking failed", exc)
+        return 1
+
+    LOGGER.info("Event tracking complete. Results written to %s", output_db)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
