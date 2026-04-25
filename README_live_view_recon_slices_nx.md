@@ -132,7 +132,6 @@ python3 live_view_recon_slices_nx.py \
 - `--comparison-path` is the current reconstruction to display initially; unless `--static` is used, the script continues auto-following newer matching datasets afterward.
 - In auto-follow mode, the display starts from the reference reconstruction and switches only when a newer matching reconstruction appears.
 - Auto-follow picks the newest valid reconstruction file among matching datasets, not just the newest dataset directory timestamp.
-- The reference dataset itself is excluded from follow-up targets once live tracking starts.
 - If `--comparison-path` is provided explicitly, the script automatically shows `current - reference`.
 - An explicit `--comparison-path` sets the starting current image; it does not disable live polling.
 - The default polling interval is now 30 seconds to reduce filesystem load; use `--poll-interval` if you want something different.
