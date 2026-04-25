@@ -16,6 +16,7 @@ from typing import Any
 
 import h5py
 import imageio.v2 as imageio
+import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -125,6 +126,33 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_TARGET_SAMPLE_COUNT,
         help="Approximate number of voxels to sample when estimating baseline noise. Default: 1000000",
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Show a threshold-tuning preview for one stepwise comparison and exit without writing outputs.",
+    )
+    parser.add_argument(
+        "--preview-sequence",
+        type=int,
+        default=None,
+        help="Sequence number to preview. Default uses the first valid step in range.",
+    )
+    parser.add_argument(
+        "--preview-z",
+        type=int,
+        default=None,
+        help="Z slice index to preview. Default chooses the slice with the strongest absolute change.",
+    )
+    parser.add_argument(
+        "--preview-colormap",
+        default="gray",
+        help="Matplotlib colormap for previous/current preview slices. Default: gray.",
+    )
+    parser.add_argument(
+        "--preview-diff-colormap",
+        default="coolwarm",
+        help="Matplotlib colormap for preview difference slices. Default: coolwarm.",
     )
     parser.add_argument(
         "--save-gifs",
@@ -413,6 +441,115 @@ def iter_diff_slices(reference_file: Path, comparison_file: Path, dataset_path: 
             ref_slice = np.asarray(ref_volume[z_index], dtype=np.float32)
             cmp_slice = np.asarray(cmp_volume[z_index], dtype=np.float32)
             yield z_index, cmp_slice - ref_slice
+
+
+def load_slice_pair(reference_file: Path, comparison_file: Path, dataset_path: str, z_index: int) -> tuple[np.ndarray, np.ndarray]:
+    with h5py.File(reference_file, "r") as ref_h5, h5py.File(comparison_file, "r") as cmp_h5:
+        ref_volume = read_dataset(ref_h5, dataset_path)
+        cmp_volume = read_dataset(cmp_h5, dataset_path)
+        if ref_volume.shape != cmp_volume.shape:
+            raise RuntimeError(
+                f"Volume shape mismatch: {reference_file} {tuple(ref_volume.shape)} vs "
+                f"{comparison_file} {tuple(cmp_volume.shape)}"
+            )
+        if z_index < 0 or z_index >= int(ref_volume.shape[0]):
+            raise RuntimeError(f"Preview z index {z_index} is out of range for volume depth {int(ref_volume.shape[0])}")
+        ref_slice = np.asarray(ref_volume[z_index], dtype=np.float32)
+        cmp_slice = np.asarray(cmp_volume[z_index], dtype=np.float32)
+    return ref_slice, cmp_slice
+
+
+def choose_preview_comparison(
+    comparisons: list[tuple[int, Path, Path, int, Path, Path]],
+    preview_sequence: int | None,
+) -> tuple[int, Path, Path, int, Path, Path]:
+    if preview_sequence is None:
+        return comparisons[0]
+    for comparison in comparisons:
+        if comparison[0] == preview_sequence:
+            return comparison
+    raise RuntimeError(f"No stepwise comparison found for preview sequence #{preview_sequence:04d}")
+
+
+def choose_preview_z(
+    reference_file: Path,
+    comparison_file: Path,
+    dataset_path: str,
+    preview_z: int | None,
+) -> int:
+    shape = volume_shape(reference_file, dataset_path)
+    if preview_z is not None:
+        if preview_z < 0 or preview_z >= shape[0]:
+            raise RuntimeError(f"--preview-z {preview_z} is out of range for depth {shape[0]}")
+        return preview_z
+
+    best_z = 0
+    best_value = float("-inf")
+    for z_index, diff_slice in iter_diff_slices(reference_file, comparison_file, dataset_path):
+        candidate = float(np.max(np.abs(diff_slice)))
+        if candidate > best_value:
+            best_value = candidate
+            best_z = z_index
+    return best_z
+
+
+def show_detection_preview(
+    reference_file: Path,
+    comparison_file: Path,
+    dataset_path: str,
+    threshold_value: float,
+    min_event_size: int,
+    preview_z: int,
+    sequence_number: int,
+    previous_sequence_number: int,
+    args: argparse.Namespace,
+) -> None:
+    reference_slice, comparison_slice = load_slice_pair(reference_file, comparison_file, dataset_path, preview_z)
+    diff_slice = comparison_slice - reference_slice
+    mask = np.abs(diff_slice) >= threshold_value
+    components = [
+        component
+        for component in find_slice_components(mask, diff_slice, preview_z)
+        if component.voxel_count >= min_event_size
+    ]
+
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = np.atleast_1d(axes).ravel()
+
+    previous_artist = axes[0].imshow(reference_slice, cmap=args.preview_colormap)
+    axes[0].set_title(f"Previous #{previous_sequence_number:04d}")
+    fig.colorbar(previous_artist, ax=axes[0], fraction=0.046, pad=0.04)
+
+    current_artist = axes[1].imshow(comparison_slice, cmap=args.preview_colormap)
+    axes[1].set_title(f"Current #{sequence_number:04d}")
+    fig.colorbar(current_artist, ax=axes[1], fraction=0.046, pad=0.04)
+
+    diff_artist = axes[2].imshow(diff_slice, cmap=args.preview_diff_colormap)
+    axes[2].set_title(f"Difference @ z={preview_z}")
+    fig.colorbar(diff_artist, ax=axes[2], fraction=0.046, pad=0.04)
+
+    mask_artist = axes[3].imshow(mask, cmap="gray")
+    axes[3].set_title(f"Threshold mask ({len(components)} events on slice)")
+    fig.colorbar(mask_artist, ax=axes[3], fraction=0.046, pad=0.04)
+    for component in components:
+        width = component.x_max - component.x_min + 1
+        height = component.y_max - component.y_min + 1
+        rectangle = plt.Rectangle(
+            (component.x_min, component.y_min),
+            width,
+            height,
+            fill=False,
+            edgecolor="red",
+            linewidth=1.5,
+        )
+        axes[3].add_patch(rectangle)
+
+    fig.suptitle(
+        f"Stepwise event preview: #{sequence_number:04d} minus #{previous_sequence_number:04d}\n"
+        f"threshold={threshold_value:.6g}, min_event_size={min_event_size}, z={preview_z}"
+    )
+    plt.tight_layout()
+    plt.show()
 
 
 def load_orthogonal_views(
@@ -1084,6 +1221,43 @@ def main() -> int:
             threshold_value = baseline_sigma * args.threshold_sigma
             LOGGER.info("Baseline noise sigma: %.6g", baseline_sigma)
             LOGGER.info("Detection threshold: %.6g", threshold_value)
+
+        if args.preview:
+            (
+                preview_sequence,
+                preview_dataset_root,
+                preview_recon_file,
+                preview_previous_sequence,
+                preview_previous_dataset_root,
+                preview_previous_recon_file,
+            ) = choose_preview_comparison(comparisons, args.preview_sequence)
+            preview_z = choose_preview_z(
+                preview_previous_recon_file,
+                preview_recon_file,
+                dataset_path,
+                args.preview_z,
+            )
+            LOGGER.info(
+                "Showing preview for stepwise comparison #%04d %s minus #%04d %s at z=%s",
+                preview_sequence,
+                preview_dataset_root,
+                preview_previous_sequence,
+                preview_previous_dataset_root,
+                preview_z,
+            )
+            show_detection_preview(
+                preview_previous_recon_file,
+                preview_recon_file,
+                dataset_path,
+                threshold_value,
+                args.min_event_size,
+                preview_z,
+                preview_sequence,
+                preview_previous_sequence,
+                args,
+            )
+            LOGGER.info("Preview complete. No database or CSV written.")
+            return 0
 
         connection = initialize_database(output_db)
         try:

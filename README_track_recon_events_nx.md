@@ -54,6 +54,19 @@ python3 track_recon_events_nx.py \
   --absolute-threshold 250
 ```
 
+Preview one stepwise comparison before writing any outputs:
+
+```bash
+python3 track_recon_events_nx.py \
+  --reference-path 0_39/039_Estaillades_WW_Drainage_first_position \
+  --start-number 2 \
+  --stop-number 20 \
+  --preview \
+  --preview-sequence 7 \
+  --absolute-threshold 250 \
+  --min-event-size 20
+```
+
 Save orthogonal stepwise GIFs:
 
 ```bash
@@ -115,6 +128,7 @@ Each comparison row also stores:
 - The `--reference-path` is used to identify the series and anchor the first valid stepwise comparison.
 - The first valid stepwise comparison in the requested range is used to estimate the baseline noise.
 - `--absolute-threshold` overrides sigma-based thresholding when you want direct control of what counts as an event.
+- `--preview` opens one selected stepwise comparison and exits without writing the SQLite or CSV outputs.
 - A CSV summary is written next to the SQLite database using the same base filename.
 - The stored timestamps currently come from the reconstruction files' filesystem modification times in UTC.
 - `--gif-labels` adds an optional corner annotation like `#0007 prev #0006` to each GIF frame.
