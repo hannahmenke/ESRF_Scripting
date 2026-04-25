@@ -539,26 +539,40 @@ def update_display(
     crop_y: str | None,
 ) -> None:
     labels: list[str] = []
+    axis_labels: list[tuple[str, str]] = []
     if orthogonal:
         plane_labels = {0: "XY", 1: "XZ", 2: "YZ"}
         labels = [f"{plane_labels[axis_id]} @ {orthogonal_center}" for axis_id in orthogonal_axes(fast)]
+        plane_axis_labels = {0: ("X", "Y"), 1: ("X", "Z"), 2: ("Y", "Z")}
+        axis_labels = [plane_axis_labels[axis_id] for axis_id in orthogonal_axes(fast)]
     else:
         labels = [f"Axis {axis_index} slice {slice_index}" for slice_index in slice_indices]
+        if axis_index == 0:
+            axis_labels = [("X", "Y")] * len(slice_indices)
+        elif axis_index == 1:
+            axis_labels = [("X", "Z")] * len(slice_indices)
+        else:
+            axis_labels = [("Y", "Z")] * len(slice_indices)
 
     panel_images: list[np.ndarray] = []
     panel_labels: list[str] = []
     panel_colormaps: list[str] = []
+    panel_axis_labels: list[tuple[str, str]] = []
     for label, image in zip(labels, images):
         panel_labels.append(label)
         panel_images.append(crop_image(image, crop_x, crop_y))
         panel_colormaps.append(colormap)
+        panel_axis_labels.append(axis_labels[len(panel_axis_labels)])
     if baseline_images is not None:
-        for label, image, baseline in zip(labels, images, baseline_images):
+        for label, image, baseline, axis_label in zip(labels, images, baseline_images, axis_labels):
             panel_labels.append(f"{label} difference")
             panel_images.append(crop_image(image - baseline, crop_x, crop_y))
             panel_colormaps.append(difference_colormap)
+            panel_axis_labels.append(axis_label)
 
-    for ax, artist, label, image, panel_cmap in zip(axes, image_artists, panel_labels, panel_images, panel_colormaps):
+    for ax, artist, label, image, panel_cmap, panel_axis_label in zip(
+        axes, image_artists, panel_labels, panel_images, panel_colormaps, panel_axis_labels
+    ):
         if artist is None:
             artist = ax.imshow(image, cmap=panel_cmap)
             ax._live_artist = artist
@@ -572,8 +586,8 @@ def update_display(
                 data_max += 0.5
             artist.set_clim(vmin=data_min, vmax=data_max)
         ax.set_title(label)
-        ax.set_xlabel("X")
-        ax.set_ylabel("Y")
+        ax.set_xlabel(panel_axis_label[0])
+        ax.set_ylabel(panel_axis_label[1])
 
     if axes:
         axes[0].figure.suptitle(title)

@@ -134,5 +134,6 @@ python3 live_view_recon_slices_nx.py \
 - `--downsample` reduces the displayed slice size at read time and is the easiest way to speed up large recon views.
 - `--crop y0:y1,x0:x1` crops the displayed images after downsampling.
 - `--crop-x` and `--crop-y` let you crop only one displayed axis.
+- Cropping uses the displayed panel axes: `XY` uses `X/Y`, `XZ` uses `X/Z`, and `YZ` uses `Y/Z`.
 - `--fast` forces `--downsample 2` and, in orthogonal mode, shows only `XY` and `XZ`.
 - `--static` renders once and keeps the window open without polling for newer reconstructions.
