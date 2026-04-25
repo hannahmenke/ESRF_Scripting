@@ -184,6 +184,10 @@ def read_dataset(h5_file: h5py.File, dataset_path: str) -> h5py.Dataset:
     return dataset
 
 
+def is_valid_volume_dataset(dataset: h5py.Dataset) -> bool:
+    return dataset.ndim == 3 and dataset.dtype.kind in "uif" and all(int(size) > 1 for size in dataset.shape)
+
+
 def downsample_image(image: np.ndarray, factor: int) -> np.ndarray:
     if factor <= 1:
         return image
@@ -243,9 +247,7 @@ def find_candidate_datasets(h5_file: h5py.File) -> list[str]:
     def visitor(name: str, obj: h5py.Dataset | h5py.Group) -> None:
         if not isinstance(obj, h5py.Dataset):
             return
-        if obj.ndim != 3:
-            return
-        if obj.dtype.kind not in "uif":
+        if not is_valid_volume_dataset(obj):
             return
 
         interpretation = decode_scalar(obj.attrs.get("interpretation"))
@@ -264,8 +266,11 @@ def resolve_volume_dataset(input_path: Path, dataset_path: str | None) -> str:
     with h5py.File(input_path, "r") as h5_file:
         if dataset_path is not None:
             dataset = read_dataset(h5_file, dataset_path)
-            if dataset.ndim != 3:
-                raise RuntimeError(f"{dataset_path} is not a 3D dataset")
+            if not is_valid_volume_dataset(dataset):
+                raise RuntimeError(
+                    f"{dataset_path} is not a valid 3D reconstruction volume dataset; "
+                    f"got shape {tuple(int(v) for v in dataset.shape)}"
+                )
             return dataset_path
 
         candidates = find_candidate_datasets(h5_file)
@@ -374,6 +379,13 @@ def dataset_position_name(dataset_root: Path, collection_dir: Path) -> str:
     return series_name
 
 
+def dataset_sequence_number(dataset_root: Path) -> int:
+    match = re.search(r"_(\d+)$", dataset_root.name)
+    if match is None:
+        return 0
+    return int(match.group(1))
+
+
 def candidate_reconstruction_files(dataset_root: Path) -> list[Path]:
     candidates: list[Path] = []
     for base_name in ("reconstructed_volumes", "reconstructed_slices"):
@@ -401,7 +413,7 @@ def is_readable_reconstruction_file(path: Path, dataset_path: str | None = None)
         resolved_dataset_path = resolve_volume_dataset(path, dataset_path)
         with h5py.File(path, "r") as h5_file:
             volume = read_dataset(h5_file, resolved_dataset_path)
-            if volume.ndim != 3:
+            if not is_valid_volume_dataset(volume):
                 return False
             z_index = min(max(int(volume.shape[0]) // 2, 0), int(volume.shape[0]) - 1)
             _ = np.asarray(volume[z_index], dtype=np.float32)
@@ -452,6 +464,7 @@ def latest_reconstruction_target(
     dataset_path: str | None = None,
 ) -> tuple[Path, Path] | None:
     best_target: tuple[Path, Path] | None = None
+    best_sequence = -1
     best_mtime = float("-inf")
 
     for dataset_dir in sorted(path for path in collection_dir.iterdir() if is_dataset_directory(path)):
@@ -463,8 +476,10 @@ def latest_reconstruction_target(
             recon_file = find_latest_reconstruction_file(dataset_dir, dataset_path)
         except Exception:
             continue
+        sequence_number = dataset_sequence_number(dataset_dir)
         recon_mtime = recon_file.stat().st_mtime
-        if recon_mtime > best_mtime:
+        if sequence_number > best_sequence or (sequence_number == best_sequence and recon_mtime > best_mtime):
+            best_sequence = sequence_number
             best_mtime = recon_mtime
             best_target = (dataset_dir, recon_file)
 
@@ -679,24 +694,50 @@ def make_display_title(
     )
 
 
-def compute_difference_images(
+def center_crop_to_shape(image: np.ndarray, rows: int, cols: int) -> np.ndarray:
+    if rows <= 0 or cols <= 0:
+        raise RuntimeError(f"Invalid crop target shape ({rows}, {cols})")
+    if image.shape[0] < rows or image.shape[1] < cols:
+        raise RuntimeError(f"Cannot crop image shape {image.shape} to ({rows}, {cols})")
+
+    row_start = (image.shape[0] - rows) // 2
+    col_start = (image.shape[1] - cols) // 2
+    return image[row_start : row_start + rows, col_start : col_start + cols]
+
+
+def align_image_pairs(
     current_images: list[np.ndarray],
     reference_images: list[np.ndarray] | None,
-) -> list[np.ndarray] | None:
+) -> tuple[list[np.ndarray], list[np.ndarray] | None]:
     if reference_images is None:
-        return None
-    difference_images: list[np.ndarray] = []
+        return current_images, None
+
+    aligned_current_images: list[np.ndarray] = []
+    aligned_reference_images: list[np.ndarray] = []
     for current, reference in zip(current_images, reference_images):
         common_rows = min(current.shape[0], reference.shape[0])
         common_cols = min(current.shape[1], reference.shape[1])
         if common_rows <= 0 or common_cols <= 0:
             raise RuntimeError(
-                f"Cannot compute difference for empty overlapping slice shapes: "
+                f"Cannot align empty overlapping slice shapes: "
                 f"current={current.shape}, reference={reference.shape}"
             )
-        difference_images.append(
-            current[:common_rows, :common_cols] - reference[:common_rows, :common_cols]
-        )
+        aligned_current_images.append(center_crop_to_shape(current, common_rows, common_cols))
+        aligned_reference_images.append(center_crop_to_shape(reference, common_rows, common_cols))
+
+    return aligned_current_images, aligned_reference_images
+
+
+def compute_difference_images(
+    current_images: list[np.ndarray],
+    reference_images: list[np.ndarray] | None,
+) -> list[np.ndarray] | None:
+    aligned_current_images, aligned_reference_images = align_image_pairs(current_images, reference_images)
+    if aligned_reference_images is None:
+        return None
+    difference_images: list[np.ndarray] = []
+    for current, reference in zip(aligned_current_images, aligned_reference_images):
+        difference_images.append(current - reference)
     return difference_images
 
 
@@ -795,6 +836,8 @@ def main() -> int:
             args.downsample,
             args.fast,
         )
+        display_images = current_images
+        difference_images = None
         if args.show_difference:
             baseline_dataset_root, baseline_recon_file = reference_dataset_root, reference_recon_file
             _, baseline_images = baseline_cache.load(
@@ -806,6 +849,8 @@ def main() -> int:
                 args.downsample,
                 args.fast,
             )
+            display_images, aligned_baseline_images = align_image_pairs(current_images, baseline_images)
+            difference_images = compute_difference_images(display_images, aligned_baseline_images)
     except Exception as exc:
         current_cache.close()
         baseline_cache.close()
@@ -840,7 +885,7 @@ def main() -> int:
         axes[:display_count],
         image_artists,
         slice_indices,
-        current_images,
+        display_images,
         args.axis,
         make_display_title(
             reference_dataset_root,
@@ -852,7 +897,7 @@ def main() -> int:
         args.difference_colormap,
         args.orthogonal or args.orthogonal_center is not None,
         orthogonal_center,
-        compute_difference_images(current_images, baseline_images),
+        difference_images,
         args.fast,
         args.crop_x,
         args.crop_y,
@@ -952,6 +997,8 @@ def main() -> int:
                         args.downsample,
                         args.fast,
                     )
+                    display_images = current_images
+                    difference_images = None
                     if args.show_difference and baseline_recon_file is not None:
                         _, baseline_images = baseline_cache.load(
                             baseline_recon_file,
@@ -962,11 +1009,13 @@ def main() -> int:
                             args.downsample,
                             args.fast,
                         )
+                        display_images, aligned_baseline_images = align_image_pairs(current_images, baseline_images)
+                        difference_images = compute_difference_images(display_images, aligned_baseline_images)
                     update_display(
                         axes[:display_count],
                         image_artists,
                         slice_indices,
-                        current_images,
+                        display_images,
                         args.axis,
                         make_display_title(
                             reference_dataset_root,
@@ -978,7 +1027,7 @@ def main() -> int:
                         args.difference_colormap,
                         args.orthogonal or args.orthogonal_center is not None,
                         orthogonal_center,
-                        compute_difference_images(current_images, baseline_images),
+                        difference_images,
                         args.fast,
                         args.crop_x,
                         args.crop_y,
