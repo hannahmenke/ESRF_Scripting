@@ -98,6 +98,16 @@ python3 live_view_recon_slices_nx.py \
   --orthogonal
 ```
 
+Show the difference images with a hot/cold colormap:
+
+```bash
+python3 live_view_recon_slices_nx.py \
+  --reference-path 0_39/039_Estaillades_WW_Drainage_first_position_0002 \
+  --difference-path 0_39/039_Estaillades_WW_Drainage_first_position_0002/reconstructed_volumes/cast_volume/039_Estaillades_WW_Drainage_first_position_0002_0000pag_db0500_vol.hdf5 \
+  --orthogonal \
+  --hot-cold
+```
+
 ## Notes
 
 - The script prefers the newest file under `reconstructed_volumes/`, and falls back to `reconstructed_slices/` if needed.
@@ -110,6 +120,8 @@ python3 live_view_recon_slices_nx.py \
 - `--orthogonal-center a,b,c` selects the orthogonal intersection point as axis0,axis1,axis2.
 - `--difference-path` adds a second panel set showing `current - baseline`.
 - When `--difference-path` is used, the figure is arranged with current slices on the first row and difference slices on the second row.
+- `--hot-cold` switches the difference images to the `coolwarm` colormap.
+- `--difference-colormap` lets you choose any matplotlib colormap explicitly for the difference images.
 - `--downsample` reduces the displayed slice size at read time and is the easiest way to speed up large recon views.
 - `--fast` forces `--downsample 2` and, in orthogonal mode, shows only `XY` and `XZ`.
 - `--static` renders once and keeps the window open without polling for newer reconstructions.

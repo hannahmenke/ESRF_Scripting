@@ -84,7 +84,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--colormap",
         default="gray",
-        help="Matplotlib colormap. Default: gray.",
+        help="Matplotlib colormap for the current reconstruction images. Default: gray.",
+    )
+    parser.add_argument(
+        "--difference-colormap",
+        default=None,
+        help="Matplotlib colormap for difference images. Default uses --colormap.",
+    )
+    parser.add_argument(
+        "--hot-cold",
+        action="store_true",
+        help="Use a diverging hot/cold colormap for difference images.",
     )
     parser.add_argument(
         "--downsample",
@@ -458,6 +468,7 @@ def update_display(
     axis_index: int,
     title: str,
     colormap: str,
+    difference_colormap: str,
     orthogonal: bool,
     orthogonal_center: tuple[int, int, int] | None,
     baseline_images: list[np.ndarray] | None,
@@ -472,20 +483,24 @@ def update_display(
 
     panel_images: list[np.ndarray] = []
     panel_labels: list[str] = []
+    panel_colormaps: list[str] = []
     for label, image in zip(labels, images):
         panel_labels.append(label)
         panel_images.append(image)
+        panel_colormaps.append(colormap)
     if baseline_images is not None:
         for label, image, baseline in zip(labels, images, baseline_images):
             panel_labels.append(f"{label} difference")
             panel_images.append(image - baseline)
+            panel_colormaps.append(difference_colormap)
 
-    for ax, artist, label, image in zip(axes, image_artists, panel_labels, panel_images):
+    for ax, artist, label, image, panel_cmap in zip(axes, image_artists, panel_labels, panel_images, panel_colormaps):
         if artist is None:
-            artist = ax.imshow(image, cmap=colormap)
+            artist = ax.imshow(image, cmap=panel_cmap)
             ax._live_artist = artist
         else:
             artist.set_data(image)
+            artist.set_cmap(panel_cmap)
             data_min = float(np.min(image))
             data_max = float(np.max(image))
             if data_min == data_max:
@@ -537,6 +552,10 @@ def main() -> int:
     if args.downsample < 1:
         print("Downsample factor must be >= 1.")
         return 1
+    if args.hot_cold:
+        args.difference_colormap = "coolwarm"
+    if args.difference_colormap is None:
+        args.difference_colormap = args.colormap
 
     current_cache = VolumeCache(args.dataset_path)
     baseline_cache = VolumeCache(args.dataset_path)
@@ -602,8 +621,11 @@ def main() -> int:
     fig, axes_array = plt.subplots(rows, cols, figsize=figsize)
     axes = np.atleast_1d(axes_array).ravel().tolist()
     image_artists: list = []
-    for ax in axes[:display_count]:
-        image_artists.append(ax.imshow(np.zeros_like(current_images[0]), cmap=args.colormap))
+    for index, ax in enumerate(axes[:display_count]):
+        panel_cmap = args.colormap
+        if baseline_images is not None and index >= base_panel_count:
+            panel_cmap = args.difference_colormap
+        image_artists.append(ax.imshow(np.zeros_like(current_images[0]), cmap=panel_cmap))
         fig.colorbar(image_artists[-1], ax=ax, fraction=0.046, pad=0.04)
     for ax in axes[display_count:]:
         ax.axis("off")
@@ -616,6 +638,7 @@ def main() -> int:
         args.axis,
         f"{current_dataset_root.name} | {current_recon_file.name}",
         args.colormap,
+        args.difference_colormap,
         args.orthogonal or args.orthogonal_center is not None,
         orthogonal_center,
         baseline_images,
@@ -641,6 +664,7 @@ def main() -> int:
             print(f"Axis: {args.axis}")
             print(f"Slices: {slice_indices}")
         print("Static mode: True")
+        print(f"Difference colormap: {args.difference_colormap}")
         try:
             plt.show()
         finally:
@@ -666,6 +690,7 @@ def main() -> int:
         print(f"Slices: {slice_indices}")
     print(f"Position mode: {args.position_mode}")
     print("Static mode: False")
+    print(f"Difference colormap: {args.difference_colormap}")
     if auto_follow:
         print(f"Watching collection for newer reconstructions: {reference_dataset_root.parent}")
 
@@ -708,6 +733,7 @@ def main() -> int:
                         args.axis,
                         f"{current_dataset_root.name} | {current_recon_file.name}",
                         args.colormap,
+                        args.difference_colormap,
                         args.orthogonal or args.orthogonal_center is not None,
                         orthogonal_center,
                         baseline_images,
