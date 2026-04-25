@@ -414,26 +414,29 @@ def resolve_reconstruction_target(raw_path: Path) -> tuple[Path, Path]:
     return dataset_root, find_latest_reconstruction_file(dataset_root)
 
 
-def latest_reconstruction_dataset(
+def latest_reconstruction_target(
     collection_dir: Path,
     exclude: Path | None = None,
     position_name: str | None = None,
-) -> Path | None:
-    dataset_dirs = sorted(
-        (path for path in collection_dir.iterdir() if is_dataset_directory(path)),
-        key=lambda path: path.stat().st_mtime,
-    )
-    for dataset_dir in reversed(dataset_dirs):
+) -> tuple[Path, Path] | None:
+    best_target: tuple[Path, Path] | None = None
+    best_mtime = float("-inf")
+
+    for dataset_dir in sorted(path for path in collection_dir.iterdir() if is_dataset_directory(path)):
         if exclude is not None and dataset_dir == exclude:
             continue
         if position_name is not None and dataset_position_name(dataset_dir, collection_dir) != position_name:
             continue
         try:
-            find_latest_reconstruction_file(dataset_dir)
+            recon_file = find_latest_reconstruction_file(dataset_dir)
         except Exception:
             continue
-        return dataset_dir
-    return None
+        recon_mtime = recon_file.stat().st_mtime
+        if recon_mtime > best_mtime:
+            best_mtime = recon_mtime
+            best_target = (dataset_dir, recon_file)
+
+    return best_target
 
 
 def resolve_display_target(
@@ -833,12 +836,12 @@ def main() -> int:
                 position_name = None
                 if args.position_mode == "same":
                     position_name = dataset_position_name(reference_dataset_root, reference_dataset_root.parent)
-                newest_dataset = latest_reconstruction_dataset(
+                newest_target = latest_reconstruction_target(
                     reference_dataset_root.parent,
                     position_name=position_name,
                 )
-                if newest_dataset is not None:
-                    latest_file = find_latest_reconstruction_file(newest_dataset)
+                if newest_target is not None:
+                    newest_dataset, latest_file = newest_target
                     if newest_dataset != current_dataset_root or latest_file != current_recon_file:
                         current_dataset_root = newest_dataset
                         current_recon_file = latest_file
