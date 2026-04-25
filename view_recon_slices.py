@@ -27,6 +27,16 @@ def parse_args() -> argparse.Namespace:
         help="Exact HDF5 dataset path for the 3D reconstruction volume.",
     )
     parser.add_argument(
+        "--orthogonal",
+        action="store_true",
+        help="Show one orthogonal XY/XZ/YZ slice triplet instead of multiple slices along one axis.",
+    )
+    parser.add_argument(
+        "--orthogonal-center",
+        default=None,
+        help="Comma-separated center indices for orthogonal views as axis0,axis1,axis2, e.g. '500,1000,1000'. Defaults to the volume center.",
+    )
+    parser.add_argument(
         "--axis",
         type=int,
         choices=(0, 1, 2),
@@ -138,6 +148,21 @@ def parse_slice_indices(raw_slices: str | None, axis_size: int, num_slices: int)
     return indices
 
 
+def parse_orthogonal_center(raw_center: str | None, shape: tuple[int, int, int]) -> tuple[int, int, int]:
+    if raw_center:
+        values = [int(part.strip()) for part in raw_center.split(",") if part.strip()]
+        if len(values) != 3:
+            raise RuntimeError("--orthogonal-center must provide exactly 3 indices: axis0,axis1,axis2")
+        center = tuple(values)
+    else:
+        center = tuple(size // 2 for size in shape)
+
+    for axis, (index, axis_size) in enumerate(zip(center, shape)):
+        if index < 0 or index >= axis_size:
+            raise RuntimeError(f"Orthogonal center index {index} is out of range for axis {axis} with size {axis_size}")
+    return center
+
+
 def extract_slice(volume: h5py.Dataset, axis: int, index: int) -> np.ndarray:
     if axis == 0:
         image = volume[index, :, :]
@@ -165,30 +190,58 @@ def main() -> int:
         dataset_path = resolve_volume_dataset(input_path, args.dataset_path)
         with h5py.File(input_path, "r") as h5_file:
             volume = read_dataset(h5_file, dataset_path)
-            axis_size = int(volume.shape[args.axis])
-            slice_indices = parse_slice_indices(args.slices, axis_size, args.num_slices)
+            volume_shape = tuple(int(v) for v in volume.shape)
 
             print(f"File: {input_path}")
             print(f"Dataset: {dataset_path}")
-            print(f"Volume shape: {volume.shape}")
-            print(f"Axis: {args.axis}")
-            print(f"Slices: {slice_indices}")
+            print(f"Volume shape: {volume_shape}")
 
-            cols = min(2, len(slice_indices))
-            rows = (len(slice_indices) + cols - 1) // cols
-            fig, axes = plt.subplots(rows, cols, figsize=(7 * cols, 6 * rows))
-            axes = np.atleast_1d(axes).ravel()
+            if args.orthogonal or args.orthogonal_center is not None:
+                center = parse_orthogonal_center(args.orthogonal_center, volume_shape)
+                print(f"Orthogonal center: {center}")
 
-            for ax, slice_index in zip(axes, slice_indices):
-                image = extract_slice(volume, args.axis, slice_index)
-                artist = ax.imshow(image, cmap=args.colormap)
-                ax.set_title(f"Axis {args.axis} slice {slice_index}")
-                ax.set_xlabel("X")
-                ax.set_ylabel("Y")
-                fig.colorbar(artist, ax=ax, fraction=0.046, pad=0.04)
+                planes = [
+                    ("XY", extract_slice(volume, 0, center[0])),
+                    ("XZ", extract_slice(volume, 1, center[1])),
+                    ("YZ", extract_slice(volume, 2, center[2])),
+                ]
 
-            for ax in axes[len(slice_indices):]:
-                ax.axis("off")
+                fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+                axes = np.atleast_1d(axes).ravel()
+
+                for ax, (plane_name, image) in zip(axes, planes):
+                    artist = ax.imshow(image, cmap=args.colormap)
+                    ax.set_title(
+                        f"{plane_name} @ (axis0, axis1, axis2) = {center}"
+                    )
+                    ax.set_xlabel("X")
+                    ax.set_ylabel("Y")
+                    fig.colorbar(artist, ax=ax, fraction=0.046, pad=0.04)
+
+                for ax in axes[len(planes):]:
+                    ax.axis("off")
+            else:
+                axis_size = int(volume.shape[args.axis])
+                slice_indices = parse_slice_indices(args.slices, axis_size, args.num_slices)
+
+                print(f"Axis: {args.axis}")
+                print(f"Slices: {slice_indices}")
+
+                cols = min(2, len(slice_indices))
+                rows = (len(slice_indices) + cols - 1) // cols
+                fig, axes = plt.subplots(rows, cols, figsize=(7 * cols, 6 * rows))
+                axes = np.atleast_1d(axes).ravel()
+
+                for ax, slice_index in zip(axes, slice_indices):
+                    image = extract_slice(volume, args.axis, slice_index)
+                    artist = ax.imshow(image, cmap=args.colormap)
+                    ax.set_title(f"Axis {args.axis} slice {slice_index}")
+                    ax.set_xlabel("X")
+                    ax.set_ylabel("Y")
+                    fig.colorbar(artist, ax=ax, fraction=0.046, pad=0.04)
+
+                for ax in axes[len(slice_indices):]:
+                    ax.axis("off")
 
             fig.suptitle(input_path.name)
             fig.tight_layout()
