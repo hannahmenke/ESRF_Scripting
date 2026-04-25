@@ -231,15 +231,17 @@ def read_dataset(h5_file: h5py.File, dataset_path: str) -> h5py.Dataset:
     return dataset
 
 
+def is_valid_volume_dataset(dataset: h5py.Dataset) -> bool:
+    return dataset.ndim == 3 and dataset.dtype.kind in "uif" and all(int(size) > 1 for size in dataset.shape)
+
+
 def find_candidate_datasets(h5_file: h5py.File) -> list[str]:
     candidates: list[str] = []
 
     def visitor(name: str, obj: h5py.Dataset | h5py.Group) -> None:
         if not isinstance(obj, h5py.Dataset):
             return
-        if obj.ndim != 3:
-            return
-        if obj.dtype.kind not in "uif":
+        if not is_valid_volume_dataset(obj):
             return
 
         interpretation = decode_scalar(obj.attrs.get("interpretation"))
@@ -258,8 +260,11 @@ def resolve_volume_dataset(input_path: Path, dataset_path: str | None) -> str:
     with h5py.File(input_path, "r") as h5_file:
         if dataset_path is not None:
             dataset = read_dataset(h5_file, dataset_path)
-            if dataset.ndim != 3:
-                raise RuntimeError(f"{dataset_path} is not a 3D dataset")
+            if not is_valid_volume_dataset(dataset):
+                raise RuntimeError(
+                    f"{dataset_path} is not a valid 3D reconstruction volume dataset; "
+                    f"got shape {tuple(int(v) for v in dataset.shape)}"
+                )
             return dataset_path
 
         candidates = find_candidate_datasets(h5_file)
@@ -295,7 +300,7 @@ def dataset_sequence_number(dataset_root: Path) -> int:
 
 def candidate_reconstruction_files(dataset_root: Path) -> list[Path]:
     candidates: list[Path] = []
-    for base_name in ("reconstructed_volumes", "reconstructed_slices"):
+    for base_name in ("reconstructed_volumes",):
         base_dir = dataset_root / base_name
         if not base_dir.is_dir():
             continue
