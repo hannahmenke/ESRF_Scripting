@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-POLL_INTERVAL = 2.0
+POLL_INTERVAL = 10.0
 DEFAULT_FIGSIZE = (18, 10)
 LOGGER = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ def parse_args() -> argparse.Namespace:
         "--poll-interval",
         type=float,
         default=POLL_INTERVAL,
-        help="Seconds between checks for a newer reconstruction.",
+        help="Seconds between checks for a newer reconstruction. Default: 10.",
     )
     parser.add_argument(
         "--colormap",
@@ -839,7 +839,7 @@ def main() -> int:
                 )
                 if newest_dataset is not None:
                     latest_file = find_latest_reconstruction_file(newest_dataset)
-                    if latest_file.stat().st_mtime > last_seen_file.stat().st_mtime:
+                    if newest_dataset != current_dataset_root or latest_file != current_recon_file:
                         current_dataset_root = newest_dataset
                         current_recon_file = latest_file
 
