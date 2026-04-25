@@ -18,6 +18,7 @@ IMAGE_KEY_PROJECTION = 0
 IMAGE_KEY_FLAT = 1
 IMAGE_KEY_DARK = 2
 DEFAULT_FIGSIZE = (14, 8)
+DISPLAY_PERCENTILES = (1.0, 99.0)
 LOGGER = logging.getLogger(__name__)
 
 
@@ -394,11 +395,15 @@ def update_display(
 ) -> None:
     image_artist.set_data(diff_image)
 
-    diff_min = float(np.min(diff_image))
-    diff_max = float(np.max(diff_image))
+    diff_min, diff_max = np.percentile(diff_image, DISPLAY_PERCENTILES)
+    diff_min = float(diff_min)
+    diff_max = float(diff_max)
     if diff_min == diff_max:
-        diff_min -= 0.5
-        diff_max += 0.5
+        diff_min = float(np.min(diff_image))
+        diff_max = float(np.max(diff_image))
+        if diff_min == diff_max:
+            diff_min -= 0.5
+            diff_max += 0.5
     image_artist.set_clim(vmin=diff_min, vmax=diff_max)
 
     axis.set_title(f"{second_dataset_root.name} - {first_dataset_root.name}")
