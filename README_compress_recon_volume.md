@@ -13,6 +13,8 @@ This script creates a smaller HDF5 copy of a reconstruction volume by applying s
 
 It is intended for large reconstructed volumes where you want a lighter analysis or preview copy without touching the original file.
 
+It also supports a preview mode so you can inspect the transformed volume before writing anything.
+
 ## How to run
 
 Basic compression with gzip:
@@ -59,10 +61,34 @@ python3 compress_recon_volume.py input_recon.hdf5 \
   --dataset-path /entry0000/reconstruction/results/data
 ```
 
+Preview the transformed volume without writing an output file:
+
+```bash
+python3 compress_recon_volume.py input_recon.hdf5 \
+  --preview-only \
+  --crop-y 300:2600 \
+  --crop-x 400:2800 \
+  --downsample 2 \
+  --clip-min 0 \
+  --clip-max 3000 \
+  --to-uint8
+```
+
+Preview first, then still write the output file:
+
+```bash
+python3 compress_recon_volume.py input_recon.hdf5 \
+  --output-dir /path/to/output_directory \
+  --preview \
+  --preview-center 500,900,900
+```
+
 ## Notes
 
 - `--to-uint8` requires both `--clip-min` and `--clip-max`.
 - `--output-dir` is required. The script writes the new file there, not into the directory where you happen to run the command.
+- `--preview-only` lets you tune parameters without writing any file, so `--output-dir` is not required in that mode.
+- `--preview-center` is specified in output-space coordinates after crop/downsample.
 - Use `--output-name` if you want a specific filename. Otherwise the default is `<input_stem>_compressed.hdf5`.
 - If you still need quantitative intensity values later, prefer staying in the original dtype and using crop/downsample/compression first.
 - `gzip` gives better compression ratios; `lzf` is usually faster.

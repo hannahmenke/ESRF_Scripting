@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import h5py
+import matplotlib.pyplot as plt
 import numpy as np
 
 
@@ -25,13 +26,33 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output-dir",
-        required=True,
+        default=None,
         help="Directory where the compressed output file will be written.",
     )
     parser.add_argument(
         "--output-name",
         default=None,
         help="Optional output filename. Default: <input_stem>_compressed.hdf5",
+    )
+    parser.add_argument(
+        "--preview",
+        action="store_true",
+        help="Show orthogonal preview slices after applying crop/downsample/clipping/masking.",
+    )
+    parser.add_argument(
+        "--preview-only",
+        action="store_true",
+        help="Show the preview and exit without writing an output file.",
+    )
+    parser.add_argument(
+        "--preview-center",
+        default=None,
+        help="Comma-separated z,y,x center indices in output-space for preview slices. Default: center of transformed volume.",
+    )
+    parser.add_argument(
+        "--preview-colormap",
+        default="gray",
+        help="Matplotlib colormap for preview images. Default: gray.",
     )
     parser.add_argument(
         "--dataset-path",
@@ -296,18 +317,91 @@ def build_output_path(input_path: Path, output_dir: Path, output_name: str | Non
     return output_dir / filename
 
 
+def parse_preview_center(raw_center: str | None, shape: tuple[int, int, int]) -> tuple[int, int, int]:
+    if raw_center:
+        values = [int(part.strip()) for part in raw_center.split(",") if part.strip()]
+        if len(values) != 3:
+            raise RuntimeError("--preview-center must provide exactly 3 indices as z,y,x")
+        center = tuple(values)
+    else:
+        center = tuple(size // 2 for size in shape)
+
+    for axis, (index, axis_size) in enumerate(zip(center, shape)):
+        if index < 0 or index >= axis_size:
+            raise RuntimeError(f"Preview center index {index} is out of range for axis {axis} with size {axis_size}")
+    return center
+
+
+def target_to_source_index(index: int, crop_range: tuple[int, int], downsample: int) -> int:
+    return crop_range[0] + index * downsample
+
+
+def build_preview_views(
+    source_dataset: h5py.Dataset,
+    crop_z: tuple[int, int],
+    crop_y: tuple[int, int],
+    crop_x: tuple[int, int],
+    downsample: int,
+    center: tuple[int, int, int],
+    args: argparse.Namespace,
+) -> list[tuple[str, np.ndarray]]:
+    z_index, y_index, x_index = center
+    source_z = target_to_source_index(z_index, crop_z, downsample)
+    source_y = target_to_source_index(y_index, crop_y, downsample)
+    source_x = target_to_source_index(x_index, crop_x, downsample)
+
+    xy = np.asarray(
+        source_dataset[source_z, crop_y[0] : crop_y[1] : downsample, crop_x[0] : crop_x[1] : downsample]
+    )
+    xz = np.asarray(
+        source_dataset[crop_z[0] : crop_z[1] : downsample, source_y, crop_x[0] : crop_x[1] : downsample]
+    )
+    yz = np.asarray(
+        source_dataset[crop_z[0] : crop_z[1] : downsample, crop_y[0] : crop_y[1] : downsample, source_x]
+    )
+
+    return [
+        ("XY", prepare_output_data(xy, args)),
+        ("XZ", prepare_output_data(xz, args)),
+        ("YZ", prepare_output_data(yz, args)),
+    ]
+
+
+def show_preview(
+    views: list[tuple[str, np.ndarray]],
+    center: tuple[int, int, int],
+    target_shape: tuple[int, int, int],
+    args: argparse.Namespace,
+) -> None:
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = np.atleast_1d(axes).ravel()
+    for ax, (plane_name, image) in zip(axes, views):
+        artist = ax.imshow(image, cmap=args.preview_colormap)
+        ax.set_title(f"{plane_name} @ {center}")
+        fig.colorbar(artist, ax=ax, fraction=0.046, pad=0.04)
+    axes[len(views)].axis("off")
+    axes[0].figure.suptitle(
+        f"Preview of transformed volume\nshape={target_shape}, center={center}, dtype={views[0][1].dtype}"
+    )
+    plt.tight_layout()
+    plt.show()
+
+
 def main() -> int:
     args = parse_args()
     configure_logging(args.log_level)
 
     input_path = Path(args.input_path).expanduser().resolve()
-    output_dir = Path(args.output_dir).expanduser().resolve()
-    output_path = build_output_path(input_path, output_dir, args.output_name)
+    output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir is not None else None
+    output_path = build_output_path(input_path, output_dir, args.output_name) if output_dir is not None else None
 
     if not input_path.is_file():
         LOGGER.error("Input file not found: %s", input_path)
         return 1
-    if not output_dir.is_dir():
+    if not args.preview_only and output_dir is None:
+        LOGGER.error("--output-dir is required unless --preview-only is used.")
+        return 1
+    if output_dir is not None and not output_dir.is_dir():
         LOGGER.error("Output directory not found: %s", output_dir)
         return 1
     if args.downsample < 1:
@@ -330,10 +424,13 @@ def main() -> int:
             target_shape = compute_output_shape(source_shape, crop_z, crop_y, crop_x, args.downsample)
             target_dtype = output_dtype(args, source_dataset.dtype)
             chunk_shape = choose_chunk_shape(target_shape, args)
+            preview_center = parse_preview_center(args.preview_center, target_shape)
 
             LOGGER.info("Input file: %s", input_path)
-            LOGGER.info("Output directory: %s", output_dir)
-            LOGGER.info("Output file: %s", output_path)
+            if output_dir is not None:
+                LOGGER.info("Output directory: %s", output_dir)
+            if output_path is not None:
+                LOGGER.info("Output file: %s", output_path)
             LOGGER.info("Input dataset: %s", dataset_path)
             LOGGER.info("Input shape: %s", source_shape)
             LOGGER.info("Crop Z: %s", crop_z)
@@ -344,6 +441,22 @@ def main() -> int:
             LOGGER.info("Output dtype: %s", target_dtype)
             LOGGER.info("Compression: %s", args.compression)
             LOGGER.info("Chunk shape: %s", chunk_shape)
+            LOGGER.info("Preview center: %s", preview_center)
+
+            if args.preview or args.preview_only:
+                preview_views = build_preview_views(
+                    source_dataset,
+                    crop_z,
+                    crop_y,
+                    crop_x,
+                    args.downsample,
+                    preview_center,
+                    args,
+                )
+                show_preview(preview_views, preview_center, target_shape, args)
+                if args.preview_only:
+                    LOGGER.info("Preview-only mode: no output file written.")
+                    return 0
 
             compression = None if args.compression == "none" else args.compression
             compression_opts = args.compression_level if compression == "gzip" else None
