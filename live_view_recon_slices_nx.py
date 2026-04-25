@@ -438,6 +438,7 @@ def latest_reconstruction_dataset(
 
 def resolve_display_target(
     reference_dataset_root: Path,
+    reference_recon_file: Path,
     second_path: Path | None,
     position_mode: str,
 ) -> tuple[Path, Path, bool]:
@@ -445,18 +446,7 @@ def resolve_display_target(
         dataset_root, recon_file = resolve_reconstruction_target(second_path)
         return dataset_root, recon_file, False
 
-    position_name = None
-    if position_mode == "same":
-        position_name = dataset_position_name(reference_dataset_root, reference_dataset_root.parent)
-
-    latest_dataset = latest_reconstruction_dataset(
-        reference_dataset_root.parent,
-        exclude=reference_dataset_root,
-        position_name=position_name,
-    )
-    if latest_dataset is None:
-        raise RuntimeError(f"No comparison reconstruction dataset found in {reference_dataset_root.parent}")
-    return latest_dataset, find_latest_reconstruction_file(latest_dataset), True
+    return reference_dataset_root, reference_recon_file, True
 
 
 def load_volume_metadata(
@@ -719,6 +709,7 @@ def main() -> int:
 
         current_dataset_root, current_recon_file, auto_follow = resolve_display_target(
             reference_dataset_root,
+            reference_recon_file,
             comparison_path,
             args.position_mode,
         )

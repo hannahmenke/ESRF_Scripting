@@ -130,6 +130,7 @@ python3 live_view_recon_slices_nx.py \
 - The script prefers the newest file under `reconstructed_volumes/`, and falls back to `reconstructed_slices/` if needed.
 - `--reference-path` is always the baseline/reference reconstruction.
 - `--comparison-path` is the current reconstruction to display; if omitted, the script auto-follows a newer matching dataset.
+- In auto-follow mode, the display starts from the reference reconstruction and switches only when a newer matching reconstruction appears.
 - If `--comparison-path` is provided explicitly, the script automatically shows `current - reference`.
 - `--position-mode same` restricts auto-follow to datasets matching the same position label as the reference dataset.
 - `--position-mode all` allows auto-follow across all positions in the same collection directory.
