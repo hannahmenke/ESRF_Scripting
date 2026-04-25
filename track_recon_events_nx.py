@@ -360,6 +360,25 @@ def list_series_datasets(
         results.append((sequence_number, dataset_dir, recon_file))
 
     results.sort(key=lambda item: item[0])
+
+    duplicate_sequences: dict[int, list[Path]] = {}
+    for sequence_number, dataset_dir, _recon_file in results:
+        duplicate_sequences.setdefault(sequence_number, []).append(dataset_dir)
+    ambiguous = {
+        sequence_number: dataset_dirs
+        for sequence_number, dataset_dirs in duplicate_sequences.items()
+        if len(dataset_dirs) > 1
+    }
+    if ambiguous:
+        details = "; ".join(
+            f"#{sequence_number:04d}: {', '.join(str(path) for path in dataset_dirs)}"
+            for sequence_number, dataset_dirs in sorted(ambiguous.items())
+        )
+        raise RuntimeError(
+            "Ambiguous dataset numbering in series. Each comparison step must have a unique "
+            f"4-digit sequence number. Conflicts: {details}"
+        )
+
     return results
 
 
@@ -372,6 +391,8 @@ def build_stepwise_comparisons(
     all_datasets = list_series_datasets(reference_dataset_root, dataset_path)
     if not all_datasets:
         return []
+
+    all_datasets = sorted(all_datasets, key=lambda item: item[0])
 
     low = min(start_number, stop_number)
     high = max(start_number, stop_number)
@@ -1199,6 +1220,10 @@ def main() -> int:
         LOGGER.info("Series anchor dataset: %s", reference_dataset_root)
         LOGGER.info("Series anchor reconstruction: %s", reference_recon_file)
         LOGGER.info("Dataset path: %s", dataset_path)
+        LOGGER.info(
+            "Processing sequence order: %s",
+            ", ".join(f"#{sequence_number:04d}" for sequence_number, *_rest in comparisons),
+        )
         LOGGER.info(
             "First stepwise comparison for baseline noise: #%04d %s minus #%04d %s",
             first_sequence,
