@@ -14,7 +14,7 @@ import numpy as np
 
 
 POLL_INTERVAL = 2.0
-DEFAULT_FIGSIZE = (14, 9)
+DEFAULT_FIGSIZE = (18, 10)
 
 
 def parse_args() -> argparse.Namespace:
@@ -472,7 +472,7 @@ def update_display(
         panel_images.append(image)
     if baseline_images is not None:
         for label, image, baseline in zip(labels, images, baseline_images):
-            panel_labels.append(f"{label} diff")
+            panel_labels.append(f"{label} difference")
             panel_images.append(image - baseline)
 
     for ax, artist, label, image in zip(axes, image_artists, panel_labels, panel_images):
@@ -582,14 +582,19 @@ def main() -> int:
         print(f"Startup failed: {exc}")
         return 1
 
-    display_count = len(orthogonal_axes(args.fast)) if (args.orthogonal or args.orthogonal_center is not None) else len(slice_indices)
+    base_panel_count = len(orthogonal_axes(args.fast)) if (args.orthogonal or args.orthogonal_center is not None) else len(slice_indices)
     if baseline_images is not None:
-        display_count *= 2
-    cols = min(2, display_count)
-    rows = (display_count + cols - 1) // cols
+        rows = 2
+        cols = base_panel_count
+        display_count = base_panel_count * 2
+    else:
+        display_count = base_panel_count
+        cols = min(2, display_count)
+        rows = (display_count + cols - 1) // cols
 
     plt.ion()
-    fig, axes_array = plt.subplots(rows, cols, figsize=DEFAULT_FIGSIZE)
+    figsize = DEFAULT_FIGSIZE if baseline_images is not None else (max(DEFAULT_FIGSIZE[0], 7 * cols), max(DEFAULT_FIGSIZE[1], 5 * rows))
+    fig, axes_array = plt.subplots(rows, cols, figsize=figsize)
     axes = np.atleast_1d(axes_array).ravel().tolist()
     image_artists: list = []
     for ax in axes[:display_count]:

@@ -97,5 +97,6 @@ python3 live_view_recon_slices_nx.py \
 - `--orthogonal` shows one XY/XZ/YZ triplet through the volume center.
 - `--orthogonal-center a,b,c` selects the orthogonal intersection point as axis0,axis1,axis2.
 - `--difference-path` adds a second panel set showing `current - baseline`.
+- When `--difference-path` is used, the figure is arranged with current slices on the first row and difference slices on the second row.
 - `--downsample` reduces the displayed slice size at read time and is the easiest way to speed up large recon views.
 - `--fast` forces `--downsample 2` and, in orthogonal mode, shows only `XY` and `XZ`.
