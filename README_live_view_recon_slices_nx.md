@@ -132,7 +132,7 @@ python3 live_view_recon_slices_nx.py \
 - `--comparison-path` is the current reconstruction to display initially; unless `--static` is used, the script continues auto-following newer matching datasets afterward.
 - In auto-follow mode, the display starts from the reference reconstruction and switches only when a newer matching reconstruction appears.
 - Auto-follow picks the newest valid reconstruction file among matching datasets, not just the newest dataset directory timestamp.
-- If `--comparison-path` is provided explicitly, the script automatically shows `current - reference`.
+- The viewer computes and displays `current - reference` by default.
 - An explicit `--comparison-path` sets the starting current image; it does not disable live polling.
 - The default polling interval is now 30 seconds to reduce filesystem load; use `--poll-interval` if you want something different.
 - `--position-mode same` restricts auto-follow to datasets matching the same position label as the reference dataset.
@@ -142,8 +142,7 @@ python3 live_view_recon_slices_nx.py \
 - Slice indices are zero-based along the chosen axis.
 - `--orthogonal` shows one XY/XZ/YZ triplet through the volume center.
 - `--orthogonal-center a,b,c` selects the orthogonal intersection point as axis0,axis1,axis2.
-- `--show-difference` adds a second panel set showing `current - reference`.
-- `--show-difference` is mainly useful in auto-follow mode; with an explicit `--comparison-path`, the difference row is enabled automatically.
+- `--show-difference` is retained for compatibility, but the difference row is enabled by default.
 - When `--show-difference` is used, the figure is arranged with current slices on the first row and difference slices on the second row.
 - `--difference-path` is deprecated and rejected; use `--reference-path`, `--comparison-path`, and `--show-difference` instead.
 - `--hot-cold` switches the difference images to the `coolwarm` colormap.
