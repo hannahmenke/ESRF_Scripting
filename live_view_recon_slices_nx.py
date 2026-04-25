@@ -685,7 +685,19 @@ def compute_difference_images(
 ) -> list[np.ndarray] | None:
     if reference_images is None:
         return None
-    return [current - reference for current, reference in zip(current_images, reference_images)]
+    difference_images: list[np.ndarray] = []
+    for current, reference in zip(current_images, reference_images):
+        common_rows = min(current.shape[0], reference.shape[0])
+        common_cols = min(current.shape[1], reference.shape[1])
+        if common_rows <= 0 or common_cols <= 0:
+            raise RuntimeError(
+                f"Cannot compute difference for empty overlapping slice shapes: "
+                f"current={current.shape}, reference={reference.shape}"
+            )
+        difference_images.append(
+            current[:common_rows, :common_cols] - reference[:common_rows, :common_cols]
+        )
+    return difference_images
 
 
 def main() -> int:
