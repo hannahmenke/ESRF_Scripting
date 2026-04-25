@@ -838,6 +838,7 @@ def main() -> int:
                     position_name = dataset_position_name(reference_dataset_root, reference_dataset_root.parent)
                 newest_target = latest_reconstruction_target(
                     reference_dataset_root.parent,
+                    exclude=reference_dataset_root,
                     position_name=position_name,
                 )
                 if newest_target is not None:
