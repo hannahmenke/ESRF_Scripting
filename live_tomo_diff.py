@@ -11,6 +11,7 @@ from pathlib import Path
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.colors import Normalize
 
 
 POLL_INTERVAL = 2.0
@@ -410,6 +411,7 @@ def resolve_second_target(
 
 def update_display(
     image_artist,
+    colorbar,
     axis,
     diff_image: np.ndarray,
     first_dataset_root: Path,
@@ -435,7 +437,8 @@ def update_display(
         if diff_min == diff_max:
             diff_min -= 0.5
             diff_max += 0.5
-    image_artist.set_clim(vmin=diff_min, vmax=diff_max)
+    image_artist.set_norm(Normalize(vmin=diff_min, vmax=diff_max))
+    colorbar.update_normal(image_artist)
 
     axis.set_title(f"{second_dataset_root.name} - {first_dataset_root.name}")
     plt.draw()
@@ -513,6 +516,7 @@ def main() -> int:
     ax.set_ylabel("Y")
     update_display(
         image_artist,
+        colorbar,
         ax,
         diff_image,
         reference_dataset_root,
@@ -559,6 +563,7 @@ def main() -> int:
                     diff_image = second_image - first_image
                     update_display(
                         image_artist,
+                        colorbar,
                         ax,
                         diff_image,
                         reference_dataset_root,
