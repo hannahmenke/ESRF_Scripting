@@ -79,13 +79,13 @@ def parse_args() -> argparse.Namespace:
         "--start-number",
         type=int,
         required=True,
-        help="First comparison sequence number to process. Unsuffixed dataset counts as 0.",
+        help="First sequence number to include in stepwise processing. Both images in a comparison pair must be within the requested range. Unsuffixed dataset counts as 0.",
     )
     parser.add_argument(
         "--stop-number",
         type=int,
         required=True,
-        help="Last comparison sequence number to process. Unsuffixed dataset counts as 0.",
+        help="Last sequence number to include in stepwise processing. Both images in a comparison pair must be within the requested range. Unsuffixed dataset counts as 0.",
     )
     parser.add_argument(
         "--dataset-path",
@@ -405,6 +405,8 @@ def build_stepwise_comparisons(
             continue
 
         previous_sequence, previous_dataset_root, previous_recon_file = all_datasets[index - 1]
+        if previous_sequence < low or previous_sequence > high:
+            continue
         comparisons.append(
             (
                 sequence_number,
