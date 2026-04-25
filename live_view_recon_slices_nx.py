@@ -388,19 +388,24 @@ def is_reconstruction_file(path: Path, dataset_path: str | None = None) -> bool:
         return False
 
 
-def find_latest_reconstruction_file(dataset_root: Path) -> Path:
+def find_latest_reconstruction_file(dataset_root: Path, dataset_path: str | None = None) -> Path:
     candidates = candidate_reconstruction_files(dataset_root)
     if not candidates:
         raise RuntimeError(f"No reconstruction HDF5 files found in {dataset_root}")
 
-    valid_candidates = [path for path in candidates if is_reconstruction_file(path)]
+    valid_candidates = [path for path in candidates if is_reconstruction_file(path, dataset_path)]
     if not valid_candidates:
         raise RuntimeError(f"No valid reconstruction volume HDF5 files found in {dataset_root}")
 
+    LOGGER.debug(
+        "Reconstruction candidates for %s: %s",
+        dataset_root,
+        [path.name for path in valid_candidates],
+    )
     return valid_candidates[-1]
 
 
-def resolve_reconstruction_target(raw_path: Path) -> tuple[Path, Path]:
+def resolve_reconstruction_target(raw_path: Path, dataset_path: str | None = None) -> tuple[Path, Path]:
     path = raw_path.expanduser().resolve()
     if not path.exists():
         raise RuntimeError(f"Path not found: {path}")
@@ -411,13 +416,14 @@ def resolve_reconstruction_target(raw_path: Path) -> tuple[Path, Path]:
     dataset_root = resolve_dataset_root(path)
     if not is_dataset_directory(dataset_root):
         raise RuntimeError(f"{path} does not resolve to a tomography dataset directory")
-    return dataset_root, find_latest_reconstruction_file(dataset_root)
+    return dataset_root, find_latest_reconstruction_file(dataset_root, dataset_path)
 
 
 def latest_reconstruction_target(
     collection_dir: Path,
     exclude: Path | None = None,
     position_name: str | None = None,
+    dataset_path: str | None = None,
 ) -> tuple[Path, Path] | None:
     best_target: tuple[Path, Path] | None = None
     best_mtime = float("-inf")
@@ -428,7 +434,7 @@ def latest_reconstruction_target(
         if position_name is not None and dataset_position_name(dataset_dir, collection_dir) != position_name:
             continue
         try:
-            recon_file = find_latest_reconstruction_file(dataset_dir)
+            recon_file = find_latest_reconstruction_file(dataset_dir, dataset_path)
         except Exception:
             continue
         recon_mtime = recon_file.stat().st_mtime
@@ -444,9 +450,10 @@ def resolve_display_target(
     reference_recon_file: Path,
     second_path: Path | None,
     position_mode: str,
+    dataset_path: str | None = None,
 ) -> tuple[Path, Path, bool]:
     if second_path is not None:
-        dataset_root, recon_file = resolve_reconstruction_target(second_path)
+        dataset_root, recon_file = resolve_reconstruction_target(second_path, dataset_path)
         return dataset_root, recon_file, True
 
     return reference_dataset_root, reference_recon_file, True
@@ -697,7 +704,7 @@ def main() -> int:
     current_cache = VolumeCache(args.dataset_path)
     baseline_cache = VolumeCache(args.dataset_path)
     try:
-        reference_dataset_root, reference_recon_file = resolve_reconstruction_target(reference_path)
+        reference_dataset_root, reference_recon_file = resolve_reconstruction_target(reference_path, args.dataset_path)
         _, reference_shape, slice_indices, orthogonal_center = load_volume_metadata(
             reference_recon_file,
             args.orthogonal,
@@ -727,6 +734,7 @@ def main() -> int:
             reference_recon_file,
             comparison_path,
             args.position_mode,
+            args.dataset_path,
         )
         dataset_path, current_images = current_cache.load(
             current_recon_file,
@@ -856,6 +864,7 @@ def main() -> int:
                 newest_target = latest_reconstruction_target(
                     reference_dataset_root.parent,
                     position_name=position_name,
+                    dataset_path=args.dataset_path,
                 )
                 if newest_target is not None:
                     newest_dataset, latest_file = newest_target
