@@ -61,6 +61,17 @@ def parse_args() -> argparse.Namespace:
         help="Seconds between checks for a newer tomography dataset.",
     )
     parser.add_argument(
+        "--downsample",
+        type=int,
+        default=1,
+        help="Display downsampling factor. 1 keeps full resolution. Default: 1.",
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Use a faster display mode by downsampling the radiogram images by at least 4.",
+    )
+    parser.add_argument(
         "--colormap",
         default="gray",
         help="Matplotlib colormap for the difference image. Default: gray.",
@@ -218,6 +229,7 @@ def load_projection_radiogram(
     scan_dir: Path,
     projection_index: int,
     dataset_path: str | None = None,
+    downsample: int = 1,
 ) -> np.ndarray:
     if projection_index < 0:
         raise RuntimeError("Projection index must be >= 0")
@@ -234,7 +246,7 @@ def load_projection_radiogram(
             dataset = read_dataset(h5_file, resolved_dataset_path)
             frame_count = int(dataset.shape[0])
             if remaining_index < frame_count:
-                return np.asarray(dataset[remaining_index], dtype=np.float32)
+                return np.asarray(dataset[remaining_index, ::downsample, ::downsample], dtype=np.float32)
             remaining_index -= frame_count
 
     total = scan_projection_count(scan_dir, resolved_dataset_path)
@@ -483,6 +495,11 @@ def main() -> int:
     if projection_index < 0:
         LOGGER.error("Projection index must be >= 0.")
         return 1
+    if args.fast:
+        args.downsample = max(args.downsample, 4)
+    if args.downsample < 1:
+        LOGGER.error("Downsample factor must be >= 1.")
+        return 1
     if args.hot_cold:
         args.colormap = "coolwarm"
     if args.display_min is not None and args.display_max is not None and args.display_min >= args.display_max:
@@ -492,7 +509,7 @@ def main() -> int:
     try:
         reference_dataset_root, reference_scan = resolve_input_target(reference_path)
         first_count = scan_projection_count(reference_scan, args.dataset_path)
-        first_image = load_projection_radiogram(reference_scan, projection_index, args.dataset_path)
+        first_image = load_projection_radiogram(reference_scan, projection_index, args.dataset_path, args.downsample)
 
         current_dataset_root, current_scan, auto_follow = resolve_second_target(
             reference_dataset_root,
@@ -500,7 +517,7 @@ def main() -> int:
             position_mode,
         )
         second_count = scan_projection_count(current_scan, args.dataset_path)
-        second_image = load_projection_radiogram(current_scan, projection_index, args.dataset_path)
+        second_image = load_projection_radiogram(current_scan, projection_index, args.dataset_path, args.downsample)
     except Exception as exc:
         log_exception_summary("Startup failed", exc)
         return 1
@@ -533,6 +550,8 @@ def main() -> int:
     LOGGER.info("Comparison projections available: %s", second_count)
     LOGGER.info("Using projection index: %s", projection_index)
     LOGGER.info("Position mode: %s", position_mode)
+    LOGGER.info("Display downsample: %s", args.downsample)
+    LOGGER.info("Fast mode: %s", args.fast)
     LOGGER.info("Colormap: %s", args.colormap)
     LOGGER.info("Display min: %s", args.display_min if args.display_min is not None else "auto")
     LOGGER.info("Display max: %s", args.display_max if args.display_max is not None else "auto")
@@ -559,7 +578,12 @@ def main() -> int:
             if current_dataset_root != last_seen_dataset:
                 try:
                     second_count = scan_projection_count(current_scan, args.dataset_path)
-                    second_image = load_projection_radiogram(current_scan, projection_index, args.dataset_path)
+                    second_image = load_projection_radiogram(
+                        current_scan,
+                        projection_index,
+                        args.dataset_path,
+                        args.downsample,
+                    )
                     diff_image = second_image - first_image
                     update_display(
                         image_artist,
