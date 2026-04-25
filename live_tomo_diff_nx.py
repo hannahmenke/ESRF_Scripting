@@ -249,6 +249,12 @@ def load_projection(
                 f"(available: 0..{frame_count - 1})"
             )
         image = np.asarray(dataset[projection_index, ::downsample, ::downsample], dtype=np.float32)
+        if not np.any(image):
+            raise RuntimeError(
+                f"Selected projection is entirely zero in {projection_file} "
+                f"(dataset {resolved_dataset_path}, index {projection_index}). "
+                "This usually means the file does not contain the actual projection intensities."
+            )
         return image
 
 
