@@ -14,6 +14,7 @@ import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import h5py
@@ -783,7 +784,7 @@ def choose_preview_z(
             raise RuntimeError(f"--preview-z {preview_z} is out of range for depth {shape[0]}")
         return preview_z
 
-    z_step = max(shape[0] // 64, 1)
+    z_step = max(shape[0] // 32, 1)
     yx_step = max(min(shape[1], shape[2]) // 512, 1)
     z_indices = list(range(0, shape[0], z_step))
     if not z_indices or z_indices[-1] != shape[0] - 1:
@@ -2018,60 +2019,69 @@ def main() -> int:
                 preview_previous_sequence,
                 preview_previous_dataset_root,
             )
-            if args.absolute_threshold is not None:
-                baseline_sigma = 0.0
-                threshold_value = float(args.absolute_threshold)
-                LOGGER.info("Baseline noise sigma: skipped because --absolute-threshold was provided")
-                LOGGER.info("Detection threshold: %.6g (absolute override)", threshold_value)
-            else:
-                baseline_sigma = estimate_baseline_sigma(
-                    preview_previous_recon_file,
-                    preview_recon_file,
-                    dataset_path,
-                    args.noise_target_samples,
-                    args.crop_z,
-                    args.crop_y,
-                    args.crop_x,
-                )
-                threshold_value = baseline_sigma * args.threshold_sigma
-                LOGGER.info(
-                    "Preview baseline noise sigma from #%04d minus #%04d: %.6g",
-                    preview_sequence,
-                    preview_previous_sequence,
-                    baseline_sigma,
-                )
-                LOGGER.info("Detection threshold: %.6g", threshold_value)
-            preview_z = choose_preview_z(
+        if args.absolute_threshold is not None:
+            baseline_sigma = 0.0
+            threshold_value = float(args.absolute_threshold)
+            LOGGER.info("Baseline noise sigma: skipped because --absolute-threshold was provided")
+            LOGGER.info("Detection threshold: %.6g (absolute override)", threshold_value)
+        else:
+            LOGGER.info("Preview stage 1/3: estimating baseline noise from the selected preview pair")
+            baseline_start = perf_counter()
+            baseline_sigma = estimate_baseline_sigma(
                 preview_previous_recon_file,
                 preview_recon_file,
                 dataset_path,
-                args.preview_z,
+                args.noise_target_samples,
                 args.crop_z,
                 args.crop_y,
                 args.crop_x,
             )
+            threshold_value = baseline_sigma * args.threshold_sigma
             LOGGER.info(
-                "Showing preview for stepwise comparison #%04d %s minus #%04d %s at z=%s",
+                "Preview baseline noise sigma from #%04d minus #%04d: %.6g",
                 preview_sequence,
-                preview_dataset_root,
                 preview_previous_sequence,
-                preview_previous_dataset_root,
-                preview_z,
+                baseline_sigma,
             )
-            show_detection_preview(
-                preview_previous_recon_file,
-                preview_recon_file,
-                dataset_path,
-                threshold_value,
+            LOGGER.info("Detection threshold: %.6g", threshold_value)
+            LOGGER.info("Preview stage 1/3 complete in %.1fs", perf_counter() - baseline_start)
+        LOGGER.info("Preview stage 2/3: choosing display z slice")
+        preview_z_start = perf_counter()
+        preview_z = choose_preview_z(
+            preview_previous_recon_file,
+            preview_recon_file,
+            dataset_path,
+            args.preview_z,
+            args.crop_z,
+            args.crop_y,
+            args.crop_x,
+        )
+        LOGGER.info("Preview stage 2/3 complete in %.1fs", perf_counter() - preview_z_start)
+        LOGGER.info(
+            "Showing preview for stepwise comparison #%04d %s minus #%04d %s at z=%s",
+            preview_sequence,
+            preview_dataset_root,
+            preview_previous_sequence,
+            preview_previous_dataset_root,
+            preview_z,
+        )
+        LOGGER.info("Preview stage 3/3: rendering preview window")
+        render_start = perf_counter()
+        show_detection_preview(
+            preview_previous_recon_file,
+            preview_recon_file,
+            dataset_path,
+            threshold_value,
                 args.min_event_size,
                 args.merge_gap,
                 preview_z,
-                preview_sequence,
-                preview_previous_sequence,
-                args,
-            )
-            LOGGER.info("Preview complete. No database or CSV written.")
-            return 0
+            preview_sequence,
+            preview_previous_sequence,
+            args,
+        )
+        LOGGER.info("Preview stage 3/3 complete in %.1fs", perf_counter() - render_start)
+        LOGGER.info("Preview complete. No database or CSV written.")
+        return 0
 
         comparisons = build_stepwise_comparisons(
             reference_dataset_root,
