@@ -248,7 +248,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gif-only",
         action="store_true",
-        help="Export GIFs and exit without detecting events or writing the SQLite/CSV outputs.",
+        help="Export GIFs and exit without writing the SQLite/CSV outputs. With --gif-mode raw, this becomes a fast screening path that skips baseline estimation and all event processing.",
     )
     parser.add_argument(
         "--gif-labels",
@@ -264,7 +264,7 @@ def parse_args() -> argparse.Namespace:
         "--gif-mode",
         choices=("raw", "diff", "both"),
         default="diff",
-        help="Whether GIFs should show raw slices, difference slices, or both. Default: diff",
+        help="Whether GIFs should show raw slices, difference slices, or both. Use raw with --gif-only for the fastest no-processing screening mode. Default: diff",
     )
     parser.add_argument(
         "--orthogonal-center",
@@ -1514,6 +1514,10 @@ def save_timeseries_gifs(
     return output_paths
 
 
+def is_raw_gif_screening_mode(args: argparse.Namespace) -> bool:
+    return bool(args.gif_only and args.gif_mode == "raw")
+
+
 def estimate_baseline_sigma(
     reference_file: Path,
     comparison_file: Path,
@@ -2275,6 +2279,7 @@ def export_events_csv(connection: sqlite3.Connection, run_id: int, output_db: Pa
 def main() -> int:
     args = parse_args()
     configure_logging(args.log_level)
+    raw_gif_screening_mode = is_raw_gif_screening_mode(args)
 
     if args.threshold_sigma <= 0:
         LOGGER.error("--threshold-sigma must be > 0")
@@ -2454,6 +2459,8 @@ def main() -> int:
             "Processing sequence order: %s",
             ", ".join(f"#{sequence_number:04d}" for sequence_number, *_rest in comparisons),
         )
+        if raw_gif_screening_mode:
+            LOGGER.info("GIF screening mode enabled: raw-only export with no baseline estimation or event processing")
 
         first_sequence, first_dataset_root, first_recon_file, first_previous_sequence, first_previous_dataset_root, first_previous_recon_file = comparisons[0]
         LOGGER.info(
@@ -2473,7 +2480,11 @@ def main() -> int:
         if any(plane not in valid_planes for plane in requested_planes):
             raise RuntimeError(f"--gif-planes must contain only {sorted(valid_planes)}")
 
-        if args.absolute_threshold is not None:
+        if raw_gif_screening_mode:
+            baseline_sigma = 0.0
+            threshold_value = None
+            LOGGER.info("Baseline noise sigma: skipped because raw GIF screening mode does not use difference processing")
+        elif args.absolute_threshold is not None:
             baseline_sigma = 0.0
             threshold_value = float(args.absolute_threshold)
             LOGGER.info("Baseline noise sigma: skipped because --absolute-threshold was provided")
@@ -2493,7 +2504,9 @@ def main() -> int:
             LOGGER.info("Detection threshold: %.6g", threshold_value)
 
         if args.gif_only:
-            gif_threshold_value = threshold_value if args.preview_diff_mode == "suppressed" else None
+            gif_threshold_value = None
+            if args.gif_mode in {"diff", "both"} and args.preview_diff_mode == "suppressed":
+                gif_threshold_value = threshold_value
             gif_paths = save_timeseries_gifs(
                 comparisons,
                 dataset_path,
