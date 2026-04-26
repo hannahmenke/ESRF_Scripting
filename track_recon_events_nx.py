@@ -1419,13 +1419,12 @@ def build_raw_gif_frames_for_dataset(
 ) -> tuple[int, dict[str, np.ndarray]]:
     sequence_number, _dataset_root, recon_file = dataset_entry
     views = load_orthogonal_views(recon_file, dataset_path, center, downsample, planes, crop_z, crop_y, crop_x)
-    label = f"#{sequence_number:04d}"
+    label = f"scan #{sequence_number:04d}"
     frames: dict[str, np.ndarray] = {}
 
     for plane in planes:
         frame = normalize_frame(views[plane], raw_colormap)
-        if labels:
-            frame = annotate_frame(frame, label)
+        frame = annotate_frame(frame, label)
         frames[f"{plane}_raw"] = frame
 
     return sequence_number, frames
