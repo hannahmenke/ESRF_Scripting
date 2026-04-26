@@ -1488,6 +1488,8 @@ def build_gif_frames_for_comparison(
 
 
 def build_raw_gif_frames_for_dataset(
+    frame_index: int,
+    total_frames: int,
     dataset_entry: tuple[int, Path, Path],
     dataset_path: str,
     center: tuple[int, int, int],
@@ -1501,7 +1503,7 @@ def build_raw_gif_frames_for_dataset(
 ) -> tuple[int, dict[str, np.ndarray]]:
     sequence_number, _dataset_root, recon_file = dataset_entry
     views = load_orthogonal_views(recon_file, dataset_path, center, downsample, planes, crop_z, crop_y, crop_x)
-    label = f"scan #{sequence_number:04d}"
+    label = f"{frame_index:03d}/{total_frames:03d} scan #{sequence_number:04d}"
     frames: dict[str, np.ndarray] = {}
 
     for plane in planes:
@@ -1509,10 +1511,12 @@ def build_raw_gif_frames_for_dataset(
         frame = annotate_frame(frame, label)
         frames[f"{plane}_raw"] = frame
 
-    return sequence_number, frames
+    return frame_index, frames
 
 
 def build_raw_gif_frame_files_for_dataset(
+    frame_index: int,
+    total_frames: int,
     dataset_entry: tuple[int, Path, Path],
     dataset_path: str,
     center: tuple[int, int, int],
@@ -1525,7 +1529,10 @@ def build_raw_gif_frame_files_for_dataset(
     crop_x: str | None,
     temp_dir: str,
 ) -> tuple[int, dict[str, str]]:
-    sequence_number, frames = build_raw_gif_frames_for_dataset(
+    sequence_number = dataset_entry[0]
+    _frame_index, frames = build_raw_gif_frames_for_dataset(
+        frame_index,
+        total_frames,
         dataset_entry,
         dataset_path,
         center,
@@ -1540,10 +1547,10 @@ def build_raw_gif_frame_files_for_dataset(
     temp_path = Path(temp_dir)
     frame_paths: dict[str, str] = {}
     for key, frame in frames.items():
-        output_path = temp_path / f"{sequence_number:04d}_{key}.png"
+        output_path = temp_path / f"{frame_index:04d}_{sequence_number:04d}_{key}.png"
         imageio.imwrite(output_path, frame)
         frame_paths[key] = str(output_path)
-    return sequence_number, frame_paths
+    return frame_index, frame_paths
 
 
 def write_gif_file(output_path: Path, frames: list[np.ndarray], fps: int) -> Path:
@@ -1690,12 +1697,12 @@ def save_raw_screening_gifs(
     jobs: int,
 ) -> list[Path]:
     total_datasets = len(datasets)
+    indexed_datasets = list(enumerate(datasets, start=1))
     output_paths = [output_db.with_name(f"{output_db.stem}_{plane}_raw.gif") for plane in planes]
     frame_duration = 1.0 / max(fps, 1)
     writers: dict[str, Any] = {}
-    sequence_order = [dataset_entry[0] for dataset_entry in datasets]
-    sequence_to_position = {sequence_number: index for index, sequence_number in enumerate(sequence_order)}
-    next_position_to_write = 0
+    frame_index_to_sequence = {frame_index: dataset_entry[0] for frame_index, dataset_entry in indexed_datasets}
+    next_frame_index_to_write = 1
     pending_results: dict[int, dict[str, str] | dict[str, np.ndarray]] = {}
 
     LOGGER.info("Opening %d raw screening GIF writer(s)", len(output_paths))
@@ -1707,10 +1714,11 @@ def save_raw_screening_gifs(
                 writers[plane] = imageio.get_writer(output_path, mode="I", duration=frame_duration)
 
             def flush_ready_frames() -> None:
-                nonlocal next_position_to_write
-                while next_position_to_write < total_datasets:
-                    sequence_number = sequence_order[next_position_to_write]
-                    frames_or_paths = pending_results.get(sequence_number)
+                nonlocal next_frame_index_to_write
+                while next_frame_index_to_write <= total_datasets:
+                    frame_index = next_frame_index_to_write
+                    sequence_number = frame_index_to_sequence[frame_index]
+                    frames_or_paths = pending_results.get(frame_index)
                     if frames_or_paths is None:
                         break
                     for plane in planes:
@@ -1718,11 +1726,11 @@ def save_raw_screening_gifs(
                         frame_or_path = frames_or_paths[key]
                         frame = frame_or_path if isinstance(frame_or_path, np.ndarray) else imageio.imread(frame_or_path)
                         writers[plane].append_data(frame)
-                    del pending_results[sequence_number]
-                    next_position_to_write += 1
+                    del pending_results[frame_index]
+                    next_frame_index_to_write += 1
                     LOGGER.info(
                         "Appended raw GIF frame %d/%d for scan #%04d",
-                        next_position_to_write,
+                        frame_index,
                         total_datasets,
                         sequence_number,
                     )
@@ -1735,16 +1743,18 @@ def save_raw_screening_gifs(
                     future_to_sequence = {}
                     next_submit_index = 0
 
-                    def submit_dataset(dataset_entry: tuple[int, Path, Path], index: int) -> None:
+                    def submit_dataset(frame_index: int, dataset_entry: tuple[int, Path, Path]) -> None:
                         sequence_number = dataset_entry[0]
                         LOGGER.info(
                             "Queueing raw GIF frame %d/%d for scan #%04d",
-                            index,
+                            frame_index,
                             total_datasets,
                             sequence_number,
                         )
                         future = executor.submit(
                             build_raw_gif_frame_files_for_dataset,
+                            frame_index,
+                            total_datasets,
                             dataset_entry,
                             dataset_path,
                             center,
@@ -1757,16 +1767,17 @@ def save_raw_screening_gifs(
                             crop_x,
                             temp_dir,
                         )
-                        future_to_sequence[future] = sequence_number
+                        future_to_sequence[future] = (frame_index, sequence_number)
 
                     while next_submit_index < min(max_workers, total_datasets):
-                        submit_dataset(datasets[next_submit_index], next_submit_index + 1)
+                        frame_index, dataset_entry = indexed_datasets[next_submit_index]
+                        submit_dataset(frame_index, dataset_entry)
                         next_submit_index += 1
 
                     completed = 0
                     while future_to_sequence:
                         future = next(as_completed(future_to_sequence))
-                        sequence_number = future_to_sequence[future]
+                        frame_index, sequence_number = future_to_sequence[future]
                         del future_to_sequence[future]
                         completed += 1
                         LOGGER.info(
@@ -1775,17 +1786,18 @@ def save_raw_screening_gifs(
                             total_datasets,
                             sequence_number,
                         )
-                        _result_sequence, frame_paths = future.result()
-                        pending_results[sequence_number] = frame_paths
+                        _result_frame_index, frame_paths = future.result()
+                        pending_results[frame_index] = frame_paths
                         LOGGER.info(
-                            "Buffered rendered frame for scan #%04d at output position %d/%d",
-                            sequence_number,
-                            sequence_to_position[sequence_number] + 1,
+                            "Buffered rendered frame %d/%d for scan #%04d",
+                            frame_index,
                             total_datasets,
+                            sequence_number,
                         )
                         flush_ready_frames()
                         if next_submit_index < total_datasets:
-                            submit_dataset(datasets[next_submit_index], next_submit_index + 1)
+                            next_frame_index, next_dataset_entry = indexed_datasets[next_submit_index]
+                            submit_dataset(next_frame_index, next_dataset_entry)
                             next_submit_index += 1
                 except KeyboardInterrupt:
                     LOGGER.warning("Cancellation requested. Stopping raw GIF screening workers.")
@@ -1796,15 +1808,17 @@ def save_raw_screening_gifs(
                 else:
                     executor.shutdown(wait=True, cancel_futures=False)
             else:
-                for index, dataset_entry in enumerate(datasets, start=1):
+                for frame_index, dataset_entry in indexed_datasets:
                     sequence_number = dataset_entry[0]
                     LOGGER.info(
                         "Rendering raw GIF frame %d/%d for scan #%04d",
-                        index,
+                        frame_index,
                         total_datasets,
                         sequence_number,
                     )
-                    _result_sequence, frames = build_raw_gif_frames_for_dataset(
+                    _result_frame_index, frames = build_raw_gif_frames_for_dataset(
+                        frame_index,
+                        total_datasets,
                         dataset_entry,
                         dataset_path,
                         center,
@@ -1816,11 +1830,11 @@ def save_raw_screening_gifs(
                         crop_y,
                         crop_x,
                     )
-                    pending_results[sequence_number] = frames
+                    pending_results[frame_index] = frames
                     flush_ready_frames()
 
-            if next_position_to_write != total_datasets:
-                remaining = sorted(sequence_number for sequence_number in pending_results)
+            if next_frame_index_to_write != total_datasets + 1:
+                remaining = sorted(frame_index for frame_index in pending_results)
                 raise RuntimeError(f"Failed to flush all raw GIF frames in order; remaining scans: {remaining}")
 
             LOGGER.info("All raw screening frames appended. Finalizing %d GIF file(s)", len(output_paths))
