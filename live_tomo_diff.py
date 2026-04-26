@@ -12,7 +12,7 @@ import h5py
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import Normalize
-from matplotlib.widgets import Slider
+from matplotlib.widgets import Button, Slider
 
 
 POLL_INTERVAL = 2.0
@@ -21,6 +21,7 @@ IMAGE_KEY_FLAT = 1
 IMAGE_KEY_DARK = 2
 DEFAULT_FIGSIZE = (14, 8)
 DISPLAY_PERCENTILES = (1.0, 99.0)
+PLAYBACK_INTERVAL_MS = 350
 LOGGER = logging.getLogger(__name__)
 
 
@@ -693,14 +694,14 @@ def main() -> int:
 
     plt.ion()
     fig, ax = plt.subplots(figsize=DEFAULT_FIGSIZE)
-    fig.subplots_adjust(bottom=0.16)
+    fig.subplots_adjust(bottom=0.24)
     image_artist = ax.imshow(history[0]["diff_image"], cmap=args.colormap)
     colorbar = fig.colorbar(image_artist, ax=ax)
     colorbar.set_label("Difference")
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
 
-    slider_ax = fig.add_axes([0.2, 0.06, 0.6, 0.03])
+    slider_ax = fig.add_axes([0.2, 0.10, 0.6, 0.03])
     history_slider = Slider(
         slider_ax,
         "Rendered diff",
@@ -710,9 +711,33 @@ def main() -> int:
         valstep=1,
     )
     current_history_index = len(history) - 1
+    playback_active = False
+    playback_reached_end = False
+
+    first_button = Button(fig.add_axes([0.18, 0.04, 0.08, 0.04]), "|<")
+    prev_button = Button(fig.add_axes([0.28, 0.04, 0.08, 0.04]), "<")
+    play_button = Button(fig.add_axes([0.38, 0.04, 0.12, 0.04]), "Play")
+    next_button = Button(fig.add_axes([0.52, 0.04, 0.08, 0.04]), ">")
+    latest_button = Button(fig.add_axes([0.62, 0.04, 0.12, 0.04]), "Latest")
 
     def refresh_slider_text() -> None:
         history_slider.valtext.set_text(f"{current_history_index + 1}/{len(history)}")
+
+    def stop_playback() -> None:
+        nonlocal playback_active
+        playback_active = False
+        play_button.label.set_text("Play")
+        fig.canvas.draw_idle()
+
+    def show_history_index(history_index: int, *, stop_animation: bool = True) -> None:
+        nonlocal current_history_index
+        history_index = max(0, min(history_index, len(history) - 1))
+        if stop_animation:
+            stop_playback()
+        if history_index == current_history_index:
+            refresh_slider_text()
+            return
+        history_slider.set_val(history_index)
 
     def on_slider_change(raw_value: float) -> None:
         nonlocal current_history_index
@@ -733,7 +758,66 @@ def main() -> int:
         )
         refresh_slider_text()
 
+    def go_to_first(_event) -> None:
+        show_history_index(0)
+
+    def go_to_previous(_event) -> None:
+        show_history_index(current_history_index - 1)
+
+    def go_to_next(_event) -> None:
+        show_history_index(current_history_index + 1)
+
+    def go_to_latest(_event) -> None:
+        show_history_index(len(history) - 1)
+
+    def playback_step() -> None:
+        nonlocal playback_reached_end
+        if not playback_active:
+            return
+        if current_history_index >= len(history) - 1:
+            playback_reached_end = True
+            stop_playback()
+            return
+        playback_reached_end = False
+        show_history_index(current_history_index + 1, stop_animation=False)
+        playback_timer.start()
+
+    def toggle_playback(_event) -> None:
+        nonlocal playback_active, playback_reached_end
+        if playback_active:
+            stop_playback()
+            return
+        if len(history) <= 1:
+            return
+        if current_history_index >= len(history) - 1 or playback_reached_end:
+            show_history_index(0)
+        playback_active = True
+        playback_reached_end = False
+        play_button.label.set_text("Pause")
+        fig.canvas.draw_idle()
+        playback_timer.start()
+
+    def on_key_press(event) -> None:
+        if event.key == "left":
+            go_to_previous(None)
+        elif event.key == "right":
+            go_to_next(None)
+        elif event.key == "home":
+            go_to_first(None)
+        elif event.key == "end":
+            go_to_latest(None)
+        elif event.key in {" ", "space"}:
+            toggle_playback(None)
+
     history_slider.on_changed(on_slider_change)
+    first_button.on_clicked(go_to_first)
+    prev_button.on_clicked(go_to_previous)
+    play_button.on_clicked(toggle_playback)
+    next_button.on_clicked(go_to_next)
+    latest_button.on_clicked(go_to_latest)
+    fig.canvas.mpl_connect("key_press_event", on_key_press)
+    playback_timer = fig.canvas.new_timer(interval=PLAYBACK_INTERVAL_MS)
+    playback_timer.add_callback(playback_step)
     sync_history_slider(history_slider, len(history))
     render_history_entry(
         history,
@@ -797,7 +881,7 @@ def main() -> int:
                     append_history_entry(history, second_image, first_image, current_dataset_root, current_scan)
                     sync_history_slider(history_slider, len(history))
                     if was_showing_latest:
-                        history_slider.set_val(len(history) - 1)
+                        show_history_index(len(history) - 1, stop_animation=False)
                     else:
                         refresh_slider_text()
                     LOGGER.info("Updated comparison dataset: %s", current_dataset_root)
