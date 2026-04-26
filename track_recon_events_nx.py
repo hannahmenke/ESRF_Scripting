@@ -1662,6 +1662,12 @@ def save_raw_screening_gifs(
     sequence_to_position = {sequence_number: index for index, sequence_number in enumerate(sequence_order)}
     next_position_to_write = 0
     pending_results: dict[int, dict[str, np.ndarray]] = {}
+    raw_screening_parallel_jobs = 1
+
+    if jobs > 1 and len(datasets) > 1:
+        LOGGER.warning(
+            "Raw GIF screening is forcing serial rendering because parallel workers have been hanging on some series."
+        )
 
     LOGGER.info("Opening %d raw screening GIF writer(s)", len(output_paths))
     try:
@@ -1687,8 +1693,8 @@ def save_raw_screening_gifs(
                     sequence_number,
                 )
 
-        if jobs > 1 and len(datasets) > 1:
-            max_workers = min(jobs, len(datasets), os.cpu_count() or jobs)
+        if raw_screening_parallel_jobs > 1 and len(datasets) > 1:
+            max_workers = min(raw_screening_parallel_jobs, len(datasets), os.cpu_count() or raw_screening_parallel_jobs)
             LOGGER.info(
                 "Running raw GIF screening frame generation with %d process workers",
                 max_workers,
