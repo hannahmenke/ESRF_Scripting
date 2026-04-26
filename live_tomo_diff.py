@@ -62,6 +62,11 @@ def parse_args() -> argparse.Namespace:
         help="Seconds between checks for a newer tomography dataset.",
     )
     parser.add_argument(
+        "--preload-history",
+        action="store_true",
+        help="At startup, render all earlier valid comparison datasets from the collection into the slider history.",
+    )
+    parser.add_argument(
         "--downsample",
         type=int,
         default=1,
@@ -380,6 +385,27 @@ def latest_projection_dataset(
     position_name: str | None = None,
     exclude: Path | None = None,
 ) -> Path | None:
+    candidates = list_projection_datasets(
+        collection_dir,
+        projection_index,
+        dataset_path,
+        position_name=position_name,
+        exclude=exclude,
+    )
+
+    if not candidates:
+        return None
+
+    return candidates[-1]
+
+
+def list_projection_datasets(
+    collection_dir: Path,
+    projection_index: int,
+    dataset_path: str | None,
+    position_name: str | None = None,
+    exclude: Path | None = None,
+) -> list[Path]:
     candidates: list[tuple[int, float, Path]] = []
 
     for dataset_dir in collection_dir.iterdir():
@@ -400,10 +426,10 @@ def latest_projection_dataset(
         candidates.append((dataset_sequence_number(dataset_dir), dataset_dir.stat().st_mtime, dataset_dir))
 
     if not candidates:
-        return None
+        return []
 
     candidates.sort(key=lambda item: (item[0], item[1], item[2].name))
-    return candidates[-1][2]
+    return [candidate[2] for candidate in candidates]
 
 
 def resolve_input_target(raw_path: Path) -> tuple[Path, Path]:
@@ -534,6 +560,54 @@ def sync_history_slider(slider: Slider, history_length: int) -> None:
     slider.ax.figure.canvas.draw_idle()
 
 
+def comparison_position_name(
+    reference_dataset_root: Path,
+    comparison_path: Path | None,
+    position_mode: str,
+) -> str | None:
+    if position_mode != "same":
+        return None
+    if comparison_path is not None:
+        comparison_dataset_root, _ = resolve_input_target(comparison_path)
+        return dataset_position_name(comparison_dataset_root, comparison_dataset_root.parent)
+    return dataset_position_name(reference_dataset_root, reference_dataset_root.parent)
+
+
+def preload_history(
+    history: list[dict[str, object]],
+    reference_dataset_root: Path,
+    reference_scan: Path,
+    comparison_path: Path | None,
+    current_dataset_root: Path,
+    projection_index: int,
+    dataset_path: str | None,
+    downsample: int,
+    position_mode: str,
+) -> None:
+    collection_dir = current_dataset_root.parent
+    position_name = comparison_position_name(reference_dataset_root, comparison_path, position_mode)
+    candidate_roots = list_projection_datasets(
+        collection_dir,
+        projection_index,
+        dataset_path,
+        position_name=position_name,
+        exclude=reference_dataset_root,
+    )
+
+    first_image = load_projection_radiogram(reference_scan, projection_index, dataset_path, downsample)
+
+    for dataset_root in candidate_roots:
+        try:
+            scan_path = find_projection_scan(dataset_root)
+            second_image = load_projection_radiogram(scan_path, projection_index, dataset_path, downsample)
+            append_history_entry(history, second_image, first_image, dataset_root, scan_path)
+        except Exception as exc:
+            log_exception_summary(f"Skipping history preload for {dataset_root}", exc)
+
+        if dataset_root == current_dataset_root:
+            break
+
+
 def main() -> int:
     args = parse_args()
     configure_logging(args.log_level)
@@ -602,7 +676,20 @@ def main() -> int:
         return 1
 
     history: list[dict[str, object]] = []
-    append_history_entry(history, second_image, first_image, current_dataset_root, current_scan)
+    if args.preload_history:
+        preload_history(
+            history,
+            reference_dataset_root,
+            reference_scan,
+            comparison_path,
+            current_dataset_root,
+            projection_index,
+            args.dataset_path,
+            args.downsample,
+            position_mode,
+        )
+    if not history:
+        append_history_entry(history, second_image, first_image, current_dataset_root, current_scan)
 
     plt.ion()
     fig, ax = plt.subplots(figsize=DEFAULT_FIGSIZE)
@@ -619,10 +706,10 @@ def main() -> int:
         "Rendered diff",
         0,
         max(len(history) - 1, 1),
-        valinit=0,
+        valinit=len(history) - 1,
         valstep=1,
     )
-    current_history_index = 0
+    current_history_index = len(history) - 1
 
     def refresh_slider_text() -> None:
         history_slider.valtext.set_text(f"{current_history_index + 1}/{len(history)}")
@@ -670,9 +757,11 @@ def main() -> int:
     LOGGER.info("Position mode: %s", position_mode)
     LOGGER.info("Display downsample: %s", args.downsample)
     LOGGER.info("Fast mode: %s", args.fast)
+    LOGGER.info("Preload history: %s", args.preload_history)
     LOGGER.info("Colormap: %s", args.colormap)
     LOGGER.info("Display min: %s", args.display_min if args.display_min is not None else "auto")
     LOGGER.info("Display max: %s", args.display_max if args.display_max is not None else "auto")
+    LOGGER.info("Initial rendered diffs in history: %s", len(history))
     if auto_follow:
         LOGGER.info("Watching collection for newer tomography datasets: %s", reference_dataset_root.parent)
 
