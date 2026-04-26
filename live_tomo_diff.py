@@ -385,6 +385,7 @@ def latest_projection_dataset(
     dataset_path: str | None,
     position_name: str | None = None,
     exclude: Path | None = None,
+    min_sequence_number: int | None = None,
 ) -> Path | None:
     candidates = list_projection_datasets(
         collection_dir,
@@ -392,6 +393,7 @@ def latest_projection_dataset(
         dataset_path,
         position_name=position_name,
         exclude=exclude,
+        min_sequence_number=min_sequence_number,
     )
 
     if not candidates:
@@ -406,6 +408,7 @@ def list_projection_datasets(
     dataset_path: str | None,
     position_name: str | None = None,
     exclude: Path | None = None,
+    min_sequence_number: int | None = None,
 ) -> list[Path]:
     candidates: list[tuple[int, float, Path]] = []
 
@@ -413,6 +416,9 @@ def list_projection_datasets(
         if not is_dataset_directory(dataset_dir):
             continue
         if exclude is not None and dataset_dir == exclude:
+            continue
+        sequence_number = dataset_sequence_number(dataset_dir)
+        if min_sequence_number is not None and sequence_number < min_sequence_number:
             continue
         if position_name is not None and dataset_position_name(dataset_dir, collection_dir) != position_name:
             continue
@@ -424,7 +430,7 @@ def list_projection_datasets(
             load_projection_radiogram(projection_scan, projection_index, dataset_path, downsample=1)
         except Exception:
             continue
-        candidates.append((dataset_sequence_number(dataset_dir), dataset_dir.stat().st_mtime, dataset_dir))
+        candidates.append((sequence_number, dataset_dir.stat().st_mtime, dataset_dir))
 
     if not candidates:
         return []
@@ -458,8 +464,13 @@ def resolve_second_target(
     projection_index: int,
     dataset_path: str | None,
 ) -> tuple[Path, Path, bool]:
+    reference_sequence_number = dataset_sequence_number(reference_dataset_root)
     if second_path is not None:
         dataset_root, scan_path = resolve_input_target(second_path)
+        if dataset_sequence_number(dataset_root) < reference_sequence_number:
+            raise RuntimeError(
+                f"Comparison dataset {dataset_root.name} is older than reference dataset {reference_dataset_root.name}"
+            )
         return dataset_root, scan_path, False
 
     position_name = None
@@ -471,6 +482,7 @@ def resolve_second_target(
         projection_index,
         dataset_path,
         position_name=position_name,
+        min_sequence_number=reference_sequence_number,
     )
     if latest_dataset is None:
         raise RuntimeError(f"No comparison tomography dataset found in {reference_dataset_root.parent}")
@@ -593,6 +605,7 @@ def preload_history(
         dataset_path,
         position_name=position_name,
         exclude=reference_dataset_root,
+        min_sequence_number=dataset_sequence_number(reference_dataset_root),
     )
 
     first_image = load_projection_radiogram(reference_scan, projection_index, dataset_path, downsample)
@@ -863,6 +876,7 @@ def main() -> int:
                     args.dataset_path,
                     exclude=reference_dataset_root,
                     position_name=position_name,
+                    min_sequence_number=dataset_sequence_number(reference_dataset_root),
                 )
                 if newest_dataset is not None and newest_dataset != last_seen_dataset:
                     current_dataset_root = newest_dataset
