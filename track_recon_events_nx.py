@@ -1695,7 +1695,9 @@ def save_raw_screening_gifs(
             )
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_sequence = {}
-                for index, dataset_entry in enumerate(datasets, start=1):
+                next_submit_index = 0
+
+                def submit_dataset(dataset_entry: tuple[int, Path, Path], index: int) -> None:
                     sequence_number = dataset_entry[0]
                     LOGGER.info(
                         "Queueing raw GIF frame %d/%d for scan #%04d",
@@ -1717,9 +1719,16 @@ def save_raw_screening_gifs(
                         crop_x,
                     )
                     future_to_sequence[future] = sequence_number
+
+                while next_submit_index < min(max_workers, total_datasets):
+                    submit_dataset(datasets[next_submit_index], next_submit_index + 1)
+                    next_submit_index += 1
+
                 completed = 0
-                for future in as_completed(future_to_sequence):
+                while future_to_sequence:
+                    future = next(as_completed(future_to_sequence))
                     sequence_number = future_to_sequence[future]
+                    del future_to_sequence[future]
                     completed += 1
                     LOGGER.info(
                         "Completed raw GIF frame render %d/%d for scan #%04d",
@@ -1736,6 +1745,9 @@ def save_raw_screening_gifs(
                         total_datasets,
                     )
                     flush_ready_frames()
+                    if next_submit_index < total_datasets:
+                        submit_dataset(datasets[next_submit_index], next_submit_index + 1)
+                        next_submit_index += 1
         else:
             for index, dataset_entry in enumerate(datasets, start=1):
                 sequence_number = dataset_entry[0]
