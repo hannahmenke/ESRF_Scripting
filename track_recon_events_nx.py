@@ -32,7 +32,7 @@ DEFAULT_TARGET_SAMPLE_COUNT = 1_000_000
 DEFAULT_THRESHOLD_SIGMA = 5.0
 DEFAULT_MAX_EVENTS = 100
 DEFAULT_MIN_EVENT_SIZE = 1000
-DEFAULT_MIN_SLICE_COMPONENT_SIZE = 4
+DEFAULT_MIN_SLICE_COMPONENT_SIZE = 16
 DEFAULT_MERGE_GAP = 10
 DEFAULT_GIF_FPS = 2
 
@@ -142,7 +142,7 @@ def parse_args() -> argparse.Namespace:
         "--min-slice-component-size",
         type=int,
         default=DEFAULT_MIN_SLICE_COMPONENT_SIZE,
-        help="Minimum 2D connected-component size to keep on each slice before 3D event merging. Default: 4",
+        help="Minimum 2D connected-component size to keep on each slice before 3D event merging. Default: 16",
     )
     parser.add_argument(
         "--merge-gap",
@@ -1557,7 +1557,12 @@ def estimate_baseline_sigma(
     return sigma
 
 
-def find_slice_components(mask: np.ndarray, diff_slice: np.ndarray, z_index: int) -> list[SliceComponent]:
+def find_slice_components(
+    mask: np.ndarray,
+    diff_slice: np.ndarray,
+    z_index: int,
+    min_slice_component_size: int = 1,
+) -> list[SliceComponent]:
     mask = np.asarray(mask, dtype=bool)
     if not np.any(mask):
         return []
@@ -1567,10 +1572,13 @@ def find_slice_components(mask: np.ndarray, diff_slice: np.ndarray, z_index: int
         return []
 
     objects = ndimage.find_objects(labeled)
+    component_sizes = np.bincount(labeled.ravel())
     components: list[SliceComponent] = []
 
     for component_id, component_slices in enumerate(objects, start=1):
         if component_slices is None:
+            continue
+        if component_sizes[component_id] < min_slice_component_size:
             continue
         y_slice, x_slice = component_slices
         local_labels = labeled[y_slice, x_slice]
@@ -1617,12 +1625,7 @@ def process_diff_slice_components(
     abs_slice = np.abs(diff_slice)
     max_abs_diff = float(np.max(abs_slice))
     mask = abs_slice >= threshold_value
-    components = find_slice_components(mask, diff_slice, z_index)
-    if min_slice_component_size > 1:
-        components = [
-            component for component in components
-            if component.voxel_count >= min_slice_component_size
-        ]
+    components = find_slice_components(mask, diff_slice, z_index, min_slice_component_size)
     return z_index, components, max_abs_diff
 
 
