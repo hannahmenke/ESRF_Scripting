@@ -1345,11 +1345,11 @@ def stack_frames_horizontally(left: np.ndarray, right: np.ndarray, separator_wid
     return output
 
 
-def build_gif_frames_for_plane(
+def build_gif_frames_for_comparison(
     comparison: tuple[int, Path, Path, int, Path, Path],
     dataset_path: str,
     center: tuple[int, int, int],
-    plane: str,
+    planes: list[str],
     mode: str,
     downsample: int,
     labels: bool,
@@ -1366,40 +1366,41 @@ def build_gif_frames_for_plane(
     crop_x: str | None,
 ) -> tuple[int, dict[str, np.ndarray]]:
     sequence_number, _dataset_root, recon_file, previous_sequence, _previous_dataset_root, previous_recon_file = comparison
-    current_views = load_orthogonal_views(recon_file, dataset_path, center, downsample, [plane], crop_z, crop_y, crop_x)
-    previous_views = load_orthogonal_views(previous_recon_file, dataset_path, center, downsample, [plane], crop_z, crop_y, crop_x)
+    current_views = load_orthogonal_views(recon_file, dataset_path, center, downsample, planes, crop_z, crop_y, crop_x)
+    previous_views = load_orthogonal_views(previous_recon_file, dataset_path, center, downsample, planes, crop_z, crop_y, crop_x)
     label = f"#{sequence_number:04d} prev #{previous_sequence:04d}"
     frames: dict[str, np.ndarray] = {}
 
-    if mode in {"raw", "both"}:
-        key = f"{plane}_raw"
-        previous_frame = normalize_frame(previous_views[plane], raw_colormap)
-        current_frame = normalize_frame(current_views[plane], raw_colormap)
-        frame = stack_frames_horizontally(previous_frame, current_frame)
-        if labels:
-            frame = annotate_frame(frame, label)
-        frames[key] = frame
-    if mode in {"diff", "both"}:
-        key = f"{plane}_diff"
-        diff_view = current_views[plane] - previous_views[plane]
-        if preview_diff_mode == "suppressed":
-            if threshold_value is None and preview_diff_noise_floor is None:
-                raise RuntimeError("Threshold value is required for suppressed GIF diff rendering")
-            noise_floor = (
-                float(preview_diff_noise_floor)
-                if preview_diff_noise_floor is not None
-                else float(preview_diff_floor_fraction) * float(threshold_value)
+    for plane in planes:
+        if mode in {"raw", "both"}:
+            key = f"{plane}_raw"
+            previous_frame = normalize_frame(previous_views[plane], raw_colormap)
+            current_frame = normalize_frame(current_views[plane], raw_colormap)
+            frame = stack_frames_horizontally(previous_frame, current_frame)
+            if labels:
+                frame = annotate_frame(frame, label)
+            frames[key] = frame
+        if mode in {"diff", "both"}:
+            key = f"{plane}_diff"
+            diff_view = current_views[plane] - previous_views[plane]
+            if preview_diff_mode == "suppressed":
+                if threshold_value is None and preview_diff_noise_floor is None:
+                    raise RuntimeError("Threshold value is required for suppressed GIF diff rendering")
+                noise_floor = (
+                    float(preview_diff_noise_floor)
+                    if preview_diff_noise_floor is not None
+                    else float(preview_diff_floor_fraction) * float(threshold_value)
+                )
+                diff_view = suppress_low_differences_for_preview(diff_view, noise_floor)
+            frame = normalize_frame(
+                diff_view,
+                diff_colormap,
+                diff_display_min,
+                diff_display_max,
             )
-            diff_view = suppress_low_differences_for_preview(diff_view, noise_floor)
-        frame = normalize_frame(
-            diff_view,
-            diff_colormap,
-            diff_display_min,
-            diff_display_max,
-        )
-        if labels:
-            frame = annotate_frame(frame, label)
-        frames[key] = frame
+            if labels:
+                frame = annotate_frame(frame, label)
+            frames[key] = frame
 
     return sequence_number, frames
 
@@ -1434,41 +1435,40 @@ def save_timeseries_gifs(
 ) -> list[Path]:
     frame_sets: dict[str, list[np.ndarray]] = {}
     output_paths: list[Path] = []
-    plane_tasks = [(comparison, plane) for comparison in comparisons for plane in planes]
-    if jobs > 1 and len(plane_tasks) > 1:
-        max_workers = min(jobs, len(plane_tasks), os.cpu_count() or jobs)
+    if jobs > 1 and len(comparisons) > 1:
+        max_workers = min(jobs, len(comparisons), os.cpu_count() or jobs)
         LOGGER.info("Running GIF frame generation in parallel with %d workers", max_workers)
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             task_results = list(
                 executor.map(
-                    build_gif_frames_for_plane,
-                    (comparison for comparison, _plane in plane_tasks),
-                    [dataset_path] * len(plane_tasks),
-                    [center] * len(plane_tasks),
-                    (plane for _comparison, plane in plane_tasks),
-                    [mode] * len(plane_tasks),
-                    [downsample] * len(plane_tasks),
-                    [labels] * len(plane_tasks),
-                    [raw_colormap] * len(plane_tasks),
-                    [diff_colormap] * len(plane_tasks),
-                    [diff_display_min] * len(plane_tasks),
-                    [diff_display_max] * len(plane_tasks),
-                    [preview_diff_mode] * len(plane_tasks),
-                    [preview_diff_noise_floor] * len(plane_tasks),
-                    [preview_diff_floor_fraction] * len(plane_tasks),
-                    [threshold_value] * len(plane_tasks),
-                    [crop_z] * len(plane_tasks),
-                    [crop_y] * len(plane_tasks),
-                    [crop_x] * len(plane_tasks),
+                    build_gif_frames_for_comparison,
+                    comparisons,
+                    [dataset_path] * len(comparisons),
+                    [center] * len(comparisons),
+                    [planes] * len(comparisons),
+                    [mode] * len(comparisons),
+                    [downsample] * len(comparisons),
+                    [labels] * len(comparisons),
+                    [raw_colormap] * len(comparisons),
+                    [diff_colormap] * len(comparisons),
+                    [diff_display_min] * len(comparisons),
+                    [diff_display_max] * len(comparisons),
+                    [preview_diff_mode] * len(comparisons),
+                    [preview_diff_noise_floor] * len(comparisons),
+                    [preview_diff_floor_fraction] * len(comparisons),
+                    [threshold_value] * len(comparisons),
+                    [crop_z] * len(comparisons),
+                    [crop_y] * len(comparisons),
+                    [crop_x] * len(comparisons),
                 )
             )
     else:
         task_results = [
-            build_gif_frames_for_plane(
+            build_gif_frames_for_comparison(
                 comparison,
                 dataset_path,
                 center,
-                plane,
+                planes,
                 mode,
                 downsample,
                 labels,
@@ -1484,7 +1484,7 @@ def save_timeseries_gifs(
                 crop_y,
                 crop_x,
             )
-            for comparison, plane in plane_tasks
+            for comparison in comparisons
         ]
 
     task_results.sort(key=lambda item: item[0])
