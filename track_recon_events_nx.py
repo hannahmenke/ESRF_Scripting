@@ -22,6 +22,7 @@ import imageio.v2 as imageio
 import matplotlib.pyplot as plt
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from scipy import ndimage
 
 
 LOGGER = logging.getLogger(__name__)
@@ -1482,68 +1483,50 @@ def estimate_baseline_sigma(
 
 
 def find_slice_components(mask: np.ndarray, diff_slice: np.ndarray, z_index: int) -> list[SliceComponent]:
-    visited = np.zeros(mask.shape, dtype=bool)
-    height, width = mask.shape
+    mask = np.asarray(mask, dtype=bool)
+    if not np.any(mask):
+        return []
+
+    labeled, component_count = ndimage.label(mask, structure=np.ones((3, 3), dtype=np.uint8))
+    if component_count == 0:
+        return []
+
+    objects = ndimage.find_objects(labeled)
     components: list[SliceComponent] = []
 
-    active_positions = np.argwhere(mask)
-    for start_y, start_x in active_positions:
-        if visited[start_y, start_x]:
+    for component_id, component_slices in enumerate(objects, start=1):
+        if component_slices is None:
+            continue
+        y_slice, x_slice = component_slices
+        local_labels = labeled[y_slice, x_slice]
+        component_mask = local_labels == component_id
+        if not np.any(component_mask):
             continue
 
-        stack = [(int(start_y), int(start_x))]
-        visited[start_y, start_x] = True
-        y_min = y_max = int(start_y)
-        x_min = x_max = int(start_x)
-        voxel_count = 0
-        peak_abs_diff = 0.0
-        peak_signed_diff = 0.0
-        sum_abs_diff = 0.0
-        sum_signed_diff = 0.0
-        z_weighted_sum = 0.0
-        y_weighted_sum = 0.0
-        x_weighted_sum = 0.0
-
-        while stack:
-            y, x = stack.pop()
-            signed_value = float(diff_slice[y, x])
-            value = abs(signed_value)
-            voxel_count += 1
-            if value > peak_abs_diff:
-                peak_abs_diff = value
-                peak_signed_diff = signed_value
-            sum_abs_diff += value
-            sum_signed_diff += signed_value
-            z_weighted_sum += float(z_index)
-            y_weighted_sum += float(y)
-            x_weighted_sum += float(x)
-            y_min = min(y_min, y)
-            y_max = max(y_max, y)
-            x_min = min(x_min, x)
-            x_max = max(x_max, x)
-
-            for ny in range(max(0, y - 1), min(height, y + 2)):
-                for nx in range(max(0, x - 1), min(width, x + 2)):
-                    if not mask[ny, nx] or visited[ny, nx]:
-                        continue
-                    visited[ny, nx] = True
-                    stack.append((ny, nx))
+        local_diff = diff_slice[y_slice, x_slice]
+        component_diff = local_diff[component_mask]
+        component_abs = np.abs(component_diff)
+        peak_index = int(np.argmax(component_abs))
+        voxel_count = int(component_mask.sum())
+        y_coords_local, x_coords_local = np.nonzero(component_mask)
+        y_coords = y_coords_local + int(y_slice.start or 0)
+        x_coords = x_coords_local + int(x_slice.start or 0)
 
         components.append(
             SliceComponent(
                 z_index=z_index,
-                y_min=y_min,
-                y_max=y_max,
-                x_min=x_min,
-                x_max=x_max,
+                y_min=int(y_coords.min()),
+                y_max=int(y_coords.max()),
+                x_min=int(x_coords.min()),
+                x_max=int(x_coords.max()),
                 voxel_count=voxel_count,
-                peak_abs_diff=peak_abs_diff,
-                peak_signed_diff=peak_signed_diff,
-                sum_abs_diff=sum_abs_diff,
-                sum_signed_diff=sum_signed_diff,
-                z_weighted_sum=z_weighted_sum,
-                y_weighted_sum=y_weighted_sum,
-                x_weighted_sum=x_weighted_sum,
+                peak_abs_diff=float(component_abs[peak_index]),
+                peak_signed_diff=float(component_diff[peak_index]),
+                sum_abs_diff=float(component_abs.sum()),
+                sum_signed_diff=float(component_diff.sum()),
+                z_weighted_sum=float(z_index * voxel_count),
+                y_weighted_sum=float(y_coords.sum()),
+                x_weighted_sum=float(x_coords.sum()),
             )
         )
 
