@@ -1476,6 +1476,25 @@ def write_gif_file(output_path: Path, frames: list[np.ndarray], fps: int) -> Pat
     return output_path
 
 
+def write_gif_file_with_logging(
+    output_path: Path,
+    frames: list[np.ndarray],
+    fps: int,
+    index: int,
+    total: int,
+) -> Path:
+    LOGGER.info(
+        "Writing GIF %d/%d: %s (%d frames)",
+        index,
+        total,
+        output_path.name,
+        len(frames),
+    )
+    written_path = write_gif_file(output_path, frames, fps)
+    LOGGER.info("Finished GIF %d/%d: %s", index, total, written_path.name)
+    return written_path
+
+
 def save_timeseries_gifs(
     comparisons: list[tuple[int, Path, Path, int, Path, Path]],
     dataset_path: str,
@@ -1664,6 +1683,7 @@ def save_raw_screening_gifs(
             )
 
     task_results.sort(key=lambda item: item[0])
+    LOGGER.info("All raw scan frames rendered. Assembling GIF frame sets for %d scans", total_datasets)
     for _sequence_number, frames in task_results:
         for key, frame in frames.items():
             frame_sets.setdefault(key, []).append(frame)
@@ -1672,21 +1692,24 @@ def save_raw_screening_gifs(
         (output_db.with_name(f"{output_db.stem}_{key}.gif"), frames)
         for key, frames in frame_sets.items()
     ]
+    LOGGER.info("Prepared %d raw screening GIF file(s) for writing", len(gif_tasks))
     if jobs > 1 and len(gif_tasks) > 1:
         max_workers = min(jobs, len(gif_tasks), os.cpu_count() or jobs)
         LOGGER.info("Writing raw GIF screening files in parallel with %d workers", max_workers)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             output_paths = list(
                 executor.map(
-                    write_gif_file,
+                    write_gif_file_with_logging,
                     (output_path for output_path, _frames in gif_tasks),
                     (frames for _output_path, frames in gif_tasks),
                     [fps] * len(gif_tasks),
+                    range(1, len(gif_tasks) + 1),
+                    [len(gif_tasks)] * len(gif_tasks),
                 )
             )
     else:
-        for output_path, frames in gif_tasks:
-            output_paths.append(write_gif_file(output_path, frames, fps))
+        for index, (output_path, frames) in enumerate(gif_tasks, start=1):
+            output_paths.append(write_gif_file_with_logging(output_path, frames, fps, index, len(gif_tasks)))
     return output_paths
 
 
