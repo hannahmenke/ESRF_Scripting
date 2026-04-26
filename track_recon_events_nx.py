@@ -1405,6 +1405,32 @@ def build_gif_frames_for_comparison(
     return sequence_number, frames
 
 
+def build_raw_gif_frames_for_dataset(
+    dataset_entry: tuple[int, Path, Path],
+    dataset_path: str,
+    center: tuple[int, int, int],
+    planes: list[str],
+    downsample: int,
+    labels: bool,
+    raw_colormap: str,
+    crop_z: str | None,
+    crop_y: str | None,
+    crop_x: str | None,
+) -> tuple[int, dict[str, np.ndarray]]:
+    sequence_number, _dataset_root, recon_file = dataset_entry
+    views = load_orthogonal_views(recon_file, dataset_path, center, downsample, planes, crop_z, crop_y, crop_x)
+    label = f"#{sequence_number:04d}"
+    frames: dict[str, np.ndarray] = {}
+
+    for plane in planes:
+        frame = normalize_frame(views[plane], raw_colormap)
+        if labels:
+            frame = annotate_frame(frame, label)
+        frames[f"{plane}_raw"] = frame
+
+    return sequence_number, frames
+
+
 def write_gif_file(output_path: Path, frames: list[np.ndarray], fps: int) -> Path:
     imageio.mimsave(output_path, frames, duration=1.0 / max(fps, 1))
     return output_path
@@ -1499,6 +1525,87 @@ def save_timeseries_gifs(
     if jobs > 1 and len(gif_tasks) > 1:
         max_workers = min(jobs, len(gif_tasks), os.cpu_count() or jobs)
         LOGGER.info("Writing GIF files in parallel with %d workers", max_workers)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            output_paths = list(
+                executor.map(
+                    write_gif_file,
+                    (output_path for output_path, _frames in gif_tasks),
+                    (frames for _output_path, frames in gif_tasks),
+                    [fps] * len(gif_tasks),
+                )
+            )
+    else:
+        for output_path, frames in gif_tasks:
+            output_paths.append(write_gif_file(output_path, frames, fps))
+    return output_paths
+
+
+def save_raw_screening_gifs(
+    datasets: list[tuple[int, Path, Path]],
+    dataset_path: str,
+    output_db: Path,
+    center: tuple[int, int, int],
+    planes: list[str],
+    downsample: int,
+    fps: int,
+    labels: bool,
+    raw_colormap: str,
+    crop_z: str | None,
+    crop_y: str | None,
+    crop_x: str | None,
+    jobs: int,
+) -> list[Path]:
+    frame_sets: dict[str, list[np.ndarray]] = {}
+    output_paths: list[Path] = []
+
+    if jobs > 1 and len(datasets) > 1:
+        max_workers = min(jobs, len(datasets), os.cpu_count() or jobs)
+        LOGGER.info("Running raw GIF screening frame generation in parallel with %d workers", max_workers)
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            task_results = list(
+                executor.map(
+                    build_raw_gif_frames_for_dataset,
+                    datasets,
+                    [dataset_path] * len(datasets),
+                    [center] * len(datasets),
+                    [planes] * len(datasets),
+                    [downsample] * len(datasets),
+                    [labels] * len(datasets),
+                    [raw_colormap] * len(datasets),
+                    [crop_z] * len(datasets),
+                    [crop_y] * len(datasets),
+                    [crop_x] * len(datasets),
+                )
+            )
+    else:
+        task_results = [
+            build_raw_gif_frames_for_dataset(
+                dataset_entry,
+                dataset_path,
+                center,
+                planes,
+                downsample,
+                labels,
+                raw_colormap,
+                crop_z,
+                crop_y,
+                crop_x,
+            )
+            for dataset_entry in datasets
+        ]
+
+    task_results.sort(key=lambda item: item[0])
+    for _sequence_number, frames in task_results:
+        for key, frame in frames.items():
+            frame_sets.setdefault(key, []).append(frame)
+
+    gif_tasks = [
+        (output_db.with_name(f"{output_db.stem}_{key}.gif"), frames)
+        for key, frames in frame_sets.items()
+    ]
+    if jobs > 1 and len(gif_tasks) > 1:
+        max_workers = min(jobs, len(gif_tasks), os.cpu_count() or jobs)
+        LOGGER.info("Writing raw GIF screening files in parallel with %d workers", max_workers)
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             output_paths = list(
                 executor.map(
@@ -2442,6 +2549,64 @@ def main() -> int:
             LOGGER.info("Preview complete. No database or CSV written.")
             return 0
 
+        LOGGER.info("Series anchor dataset: %s", reference_dataset_root)
+        LOGGER.info("Series anchor reconstruction: %s", reference_recon_file)
+        LOGGER.info("Dataset path: %s", dataset_path)
+        LOGGER.info("Event detection workers: %d", args.jobs)
+
+        requested_planes = [part.strip().lower() for part in args.gif_planes.split(",") if part.strip()]
+        valid_planes = {"xy", "xz", "yz"}
+        if any(plane not in valid_planes for plane in requested_planes):
+            raise RuntimeError(f"--gif-planes must contain only {sorted(valid_planes)}")
+
+        if raw_gif_screening_mode:
+            series_datasets = list_series_datasets(reference_dataset_root, dataset_path)
+            low = min(args.start_number, args.stop_number)
+            high = max(args.start_number, args.stop_number)
+            screening_datasets = [
+                (sequence_number, dataset_root, recon_file)
+                for sequence_number, dataset_root, recon_file in series_datasets
+                if low <= sequence_number <= high
+            ]
+            if not screening_datasets:
+                raise RuntimeError("No reconstruction scans found in the requested range for raw GIF screening")
+
+            LOGGER.info("GIF screening mode enabled: raw-only export with no baseline estimation or event processing")
+            LOGGER.info(
+                "Screening sequence order: %s",
+                ", ".join(f"#{sequence_number:04d}" for sequence_number, *_rest in screening_datasets),
+            )
+
+            first_screening_sequence, first_screening_dataset_root, first_screening_recon_file = screening_datasets[0]
+            LOGGER.info(
+                "First screening scan: #%04d %s",
+                first_screening_sequence,
+                first_screening_dataset_root,
+            )
+            center = parse_orthogonal_center(
+                args.orthogonal_center,
+                volume_shape(first_screening_recon_file, dataset_path, args.crop_z, args.crop_y, args.crop_x),
+            )
+            gif_paths = save_raw_screening_gifs(
+                screening_datasets,
+                dataset_path,
+                output_db,
+                center,
+                requested_planes,
+                args.gif_downsample,
+                args.gif_fps,
+                args.gif_labels,
+                args.gif_colormap,
+                args.crop_z,
+                args.crop_y,
+                args.crop_x,
+                args.jobs,
+            )
+            for gif_path in gif_paths:
+                LOGGER.info("GIF written to %s", gif_path)
+            LOGGER.info("Raw GIF screening export complete. No database or CSV written.")
+            return 0
+
         comparisons = build_stepwise_comparisons(
             reference_dataset_root,
             args.start_number,
@@ -2451,16 +2616,10 @@ def main() -> int:
         if not comparisons:
             raise RuntimeError("No stepwise comparison reconstructions found in the requested range")
 
-        LOGGER.info("Series anchor dataset: %s", reference_dataset_root)
-        LOGGER.info("Series anchor reconstruction: %s", reference_recon_file)
-        LOGGER.info("Dataset path: %s", dataset_path)
-        LOGGER.info("Event detection workers: %d", args.jobs)
         LOGGER.info(
             "Processing sequence order: %s",
             ", ".join(f"#{sequence_number:04d}" for sequence_number, *_rest in comparisons),
         )
-        if raw_gif_screening_mode:
-            LOGGER.info("GIF screening mode enabled: raw-only export with no baseline estimation or event processing")
 
         first_sequence, first_dataset_root, first_recon_file, first_previous_sequence, first_previous_dataset_root, first_previous_recon_file = comparisons[0]
         LOGGER.info(
@@ -2475,16 +2634,8 @@ def main() -> int:
             args.orthogonal_center,
             volume_shape(first_recon_file, dataset_path, args.crop_z, args.crop_y, args.crop_x),
         )
-        requested_planes = [part.strip().lower() for part in args.gif_planes.split(",") if part.strip()]
-        valid_planes = {"xy", "xz", "yz"}
-        if any(plane not in valid_planes for plane in requested_planes):
-            raise RuntimeError(f"--gif-planes must contain only {sorted(valid_planes)}")
 
-        if raw_gif_screening_mode:
-            baseline_sigma = 0.0
-            threshold_value = None
-            LOGGER.info("Baseline noise sigma: skipped because raw GIF screening mode does not use difference processing")
-        elif args.absolute_threshold is not None:
+        if args.absolute_threshold is not None:
             baseline_sigma = 0.0
             threshold_value = float(args.absolute_threshold)
             LOGGER.info("Baseline noise sigma: skipped because --absolute-threshold was provided")
