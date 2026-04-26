@@ -1693,7 +1693,8 @@ def save_raw_screening_gifs(
                 "Running raw GIF screening frame generation with %d thread workers to avoid process transfer overhead",
                 max_workers,
             )
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            executor = ThreadPoolExecutor(max_workers=max_workers)
+            try:
                 future_to_sequence = {}
                 next_submit_index = 0
 
@@ -1748,6 +1749,14 @@ def save_raw_screening_gifs(
                     if next_submit_index < total_datasets:
                         submit_dataset(datasets[next_submit_index], next_submit_index + 1)
                         next_submit_index += 1
+            except KeyboardInterrupt:
+                LOGGER.warning("Cancellation requested. Stopping raw GIF screening workers.")
+                for future in future_to_sequence:
+                    future.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                executor.shutdown(wait=True, cancel_futures=False)
         else:
             for index, dataset_entry in enumerate(datasets, start=1):
                 sequence_number = dataset_entry[0]
