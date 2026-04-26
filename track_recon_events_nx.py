@@ -96,6 +96,11 @@ def parse_args() -> argparse.Namespace:
         help="Last sequence number to include in stepwise processing. Both images in a comparison pair must be within the requested range. Unsuffixed dataset counts as 0.",
     )
     parser.add_argument(
+        "--skip-scans",
+        default=None,
+        help="Comma-separated scan sequence numbers or ranges to exclude, for example 12,15,20-24.",
+    )
+    parser.add_argument(
         "--dataset-path",
         default=None,
         help="Exact HDF5 dataset path for the reconstruction volume.",
@@ -398,6 +403,27 @@ def parse_crop_range(raw_range: str | None, size: int, axis_name: str) -> tuple[
     return start, stop
 
 
+def parse_skip_scan_numbers(raw_value: str | None) -> set[int]:
+    if raw_value is None or not raw_value.strip():
+        return set()
+
+    skipped: set[int] = set()
+    for raw_part in raw_value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_text, stop_text = part.split("-", 1)
+            start = int(start_text.strip())
+            stop = int(stop_text.strip())
+            low = min(start, stop)
+            high = max(start, stop)
+            skipped.update(range(low, high + 1))
+            continue
+        skipped.add(int(part))
+    return skipped
+
+
 def crop_ranges_for_shape(
     shape: tuple[int, int, int],
     crop_z: str | None,
@@ -488,15 +514,20 @@ def resolve_reconstruction_target(raw_path: Path, dataset_path: str | None = Non
 def list_series_datasets(
     reference_dataset_root: Path,
     dataset_path: str | None,
+    skipped_scans: set[int] | None = None,
 ) -> list[tuple[int, Path, Path]]:
     collection_dir = reference_dataset_root.parent
     series_name = dataset_series_name(reference_dataset_root)
     results: list[tuple[int, Path, Path]] = []
+    skipped_scans = skipped_scans or set()
 
     for dataset_dir in sorted(path for path in collection_dir.iterdir() if is_dataset_directory(path)):
         if dataset_series_name(dataset_dir) != series_name:
             continue
         sequence_number = dataset_sequence_number(dataset_dir)
+        if sequence_number in skipped_scans:
+            LOGGER.info("Skipping excluded series member #%04d: dataset=%s", sequence_number, dataset_dir)
+            continue
         try:
             recon_file = find_latest_reconstruction_file(dataset_dir, dataset_path)
         except Exception as exc:
@@ -527,15 +558,23 @@ def list_series_datasets(
     return results
 
 
-def list_series_dataset_roots(reference_dataset_root: Path) -> list[tuple[int, Path]]:
+def list_series_dataset_roots(
+    reference_dataset_root: Path,
+    skipped_scans: set[int] | None = None,
+) -> list[tuple[int, Path]]:
     collection_dir = reference_dataset_root.parent
     series_name = dataset_series_name(reference_dataset_root)
     results: list[tuple[int, Path]] = []
+    skipped_scans = skipped_scans or set()
 
     for dataset_dir in sorted(path for path in collection_dir.iterdir() if is_dataset_directory(path)):
         if dataset_series_name(dataset_dir) != series_name:
             continue
-        results.append((dataset_sequence_number(dataset_dir), dataset_dir))
+        sequence_number = dataset_sequence_number(dataset_dir)
+        if sequence_number in skipped_scans:
+            LOGGER.info("Skipping excluded series root #%04d: dataset=%s", sequence_number, dataset_dir)
+            continue
+        results.append((sequence_number, dataset_dir))
 
     duplicate_sequences: dict[int, list[Path]] = {}
     for sequence_number, dataset_dir in results:
@@ -564,8 +603,9 @@ def build_stepwise_comparisons(
     start_number: int,
     stop_number: int,
     dataset_path: str | None,
+    skipped_scans: set[int] | None = None,
 ) -> list[tuple[int, Path, Path, int, Path, Path]]:
-    all_datasets = list_series_datasets(reference_dataset_root, dataset_path)
+    all_datasets = list_series_datasets(reference_dataset_root, dataset_path, skipped_scans)
     if not all_datasets:
         return []
 
@@ -611,12 +651,13 @@ def resolve_preview_comparison(
     stop_number: int,
     dataset_path: str | None,
     preview_sequence: int | None,
+    skipped_scans: set[int] | None = None,
 ) -> tuple[int, Path, Path, int, Path, Path]:
     low = min(start_number, stop_number)
     high = max(start_number, stop_number)
     series_roots = [
         (sequence_number, dataset_root)
-        for sequence_number, dataset_root in list_series_dataset_roots(reference_dataset_root)
+        for sequence_number, dataset_root in list_series_dataset_roots(reference_dataset_root, skipped_scans)
         if low <= sequence_number <= high
     ]
     if not series_roots:
@@ -2009,6 +2050,7 @@ def initialize_database(db_path: Path) -> sqlite3.Connection:
             dataset_path TEXT NOT NULL,
             start_number INTEGER NOT NULL,
             stop_number INTEGER NOT NULL,
+            skipped_scans TEXT NOT NULL DEFAULT '',
             baseline_sigma REAL NOT NULL,
             threshold_sigma REAL NOT NULL,
             threshold_value REAL NOT NULL,
@@ -2090,6 +2132,8 @@ def initialize_database(db_path: Path) -> sqlite3.Connection:
         connection.execute(
             f"ALTER TABLE runs ADD COLUMN min_slice_component_size INTEGER NOT NULL DEFAULT {DEFAULT_MIN_SLICE_COMPONENT_SIZE}"
         )
+    if "skipped_scans" not in run_columns:
+        connection.execute("ALTER TABLE runs ADD COLUMN skipped_scans TEXT NOT NULL DEFAULT ''")
     if "crop_z_start" not in run_columns:
         connection.execute("ALTER TABLE runs ADD COLUMN crop_z_start INTEGER NOT NULL DEFAULT 0")
     if "crop_y_start" not in run_columns:
@@ -2147,6 +2191,7 @@ def insert_run(
             dataset_path,
             start_number,
             stop_number,
+            skipped_scans,
             baseline_sigma,
             threshold_sigma,
             threshold_value,
@@ -2157,7 +2202,7 @@ def insert_run(
             crop_y_start,
             crop_x_start,
             max_events
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(reference_path),
@@ -2166,6 +2211,7 @@ def insert_run(
             dataset_path,
             args.start_number,
             args.stop_number,
+            args.skip_scans or "",
             baseline_sigma,
             args.threshold_sigma,
             threshold_value,
@@ -2386,6 +2432,11 @@ def main() -> int:
     args = parse_args()
     configure_logging(args.log_level)
     raw_gif_screening_mode = is_raw_gif_screening_mode(args)
+    try:
+        skipped_scans = parse_skip_scan_numbers(args.skip_scans)
+    except ValueError as exc:
+        LOGGER.error("--skip-scans is invalid: %s", exc)
+        return 1
 
     if args.threshold_sigma <= 0:
         LOGGER.error("--threshold-sigma must be > 0")
@@ -2458,6 +2509,7 @@ def main() -> int:
                 args.stop_number,
                 dataset_path,
                 args.preview_sequence,
+                skipped_scans,
             )
             LOGGER.info("Series anchor dataset: %s", reference_dataset_root)
             LOGGER.info("Series anchor reconstruction: %s", reference_recon_file)
@@ -2552,6 +2604,11 @@ def main() -> int:
         LOGGER.info("Series anchor reconstruction: %s", reference_recon_file)
         LOGGER.info("Dataset path: %s", dataset_path)
         LOGGER.info("Event detection workers: %d", args.jobs)
+        if skipped_scans:
+            LOGGER.info(
+                "Excluded scans: %s",
+                ", ".join(f"#{sequence_number:04d}" for sequence_number in sorted(skipped_scans)),
+            )
 
         requested_planes = [part.strip().lower() for part in args.gif_planes.split(",") if part.strip()]
         valid_planes = {"xy", "xz", "yz"}
@@ -2559,7 +2616,7 @@ def main() -> int:
             raise RuntimeError(f"--gif-planes must contain only {sorted(valid_planes)}")
 
         if raw_gif_screening_mode:
-            series_datasets = list_series_datasets(reference_dataset_root, dataset_path)
+            series_datasets = list_series_datasets(reference_dataset_root, dataset_path, skipped_scans)
             low = min(args.start_number, args.stop_number)
             high = max(args.start_number, args.stop_number)
             screening_datasets = [
@@ -2611,6 +2668,7 @@ def main() -> int:
             args.start_number,
             args.stop_number,
             dataset_path,
+            skipped_scans,
         )
         if not comparisons:
             raise RuntimeError("No stepwise comparison reconstructions found in the requested range")
