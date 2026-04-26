@@ -1915,7 +1915,6 @@ def main() -> int:
         if not comparisons:
             raise RuntimeError("No stepwise comparison reconstructions found in the requested range")
 
-        first_sequence, first_dataset_root, first_recon_file, first_previous_sequence, first_previous_dataset_root, first_previous_recon_file = comparisons[0]
         LOGGER.info("Series anchor dataset: %s", reference_dataset_root)
         LOGGER.info("Series anchor reconstruction: %s", reference_recon_file)
         LOGGER.info("Dataset path: %s", dataset_path)
@@ -1923,13 +1922,6 @@ def main() -> int:
         LOGGER.info(
             "Processing sequence order: %s",
             ", ".join(f"#{sequence_number:04d}" for sequence_number, *_rest in comparisons),
-        )
-        LOGGER.info(
-            "First stepwise comparison for baseline noise: #%04d %s minus #%04d %s",
-            first_sequence,
-            first_dataset_root,
-            first_previous_sequence,
-            first_previous_dataset_root,
         )
 
         if args.preview:
@@ -1941,6 +1933,13 @@ def main() -> int:
                 preview_previous_dataset_root,
                 preview_previous_recon_file,
             ) = choose_preview_comparison(comparisons, args.preview_sequence)
+            LOGGER.info(
+                "Preview comparison selected: #%04d %s minus #%04d %s",
+                preview_sequence,
+                preview_dataset_root,
+                preview_previous_sequence,
+                preview_previous_dataset_root,
+            )
             if args.absolute_threshold is not None:
                 baseline_sigma = 0.0
                 threshold_value = float(args.absolute_threshold)
@@ -1995,6 +1994,15 @@ def main() -> int:
             )
             LOGGER.info("Preview complete. No database or CSV written.")
             return 0
+
+        first_sequence, first_dataset_root, first_recon_file, first_previous_sequence, first_previous_dataset_root, first_previous_recon_file = comparisons[0]
+        LOGGER.info(
+            "First stepwise comparison for baseline noise: #%04d %s minus #%04d %s",
+            first_sequence,
+            first_dataset_root,
+            first_previous_sequence,
+            first_previous_dataset_root,
+        )
 
         center = parse_orthogonal_center(
             args.orthogonal_center,
