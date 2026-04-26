@@ -1603,8 +1603,16 @@ def save_raw_screening_gifs(
         max_workers = min(jobs, len(datasets), os.cpu_count() or jobs)
         LOGGER.info("Running raw GIF screening frame generation in parallel with %d workers", max_workers)
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            future_to_sequence = {
-                executor.submit(
+            future_to_sequence = {}
+            for index, dataset_entry in enumerate(datasets, start=1):
+                sequence_number = dataset_entry[0]
+                LOGGER.info(
+                    "Queueing raw GIF frame %d/%d for scan #%04d",
+                    index,
+                    total_datasets,
+                    sequence_number,
+                )
+                future = executor.submit(
                     build_raw_gif_frames_for_dataset,
                     dataset_entry,
                     dataset_path,
@@ -1616,16 +1624,15 @@ def save_raw_screening_gifs(
                     crop_z,
                     crop_y,
                     crop_x,
-                ): dataset_entry[0]
-                for dataset_entry in datasets
-            }
+                )
+                future_to_sequence[future] = sequence_number
             task_results = []
             completed = 0
             for future in as_completed(future_to_sequence):
                 sequence_number = future_to_sequence[future]
                 completed += 1
                 LOGGER.info(
-                    "Rendered raw GIF frame %d/%d for scan #%04d",
+                    "Completed raw GIF frame %d/%d for scan #%04d",
                     completed,
                     total_datasets,
                     sequence_number,
