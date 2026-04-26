@@ -164,6 +164,11 @@ def parse_args() -> argparse.Namespace:
         help="Show a threshold-tuning preview for one stepwise comparison and exit without writing outputs.",
     )
     parser.add_argument(
+        "--benchmark-io",
+        action="store_true",
+        help="Benchmark metadata, HDF5 open, slice read, diff-slice read, baseline, and preview-z timings for one comparison pair and exit.",
+    )
+    parser.add_argument(
         "--preview-sequence",
         type=int,
         default=None,
@@ -174,6 +179,16 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Z slice index to preview. Default chooses the slice with the strongest absolute change.",
+    )
+    parser.add_argument(
+        "--preview-output",
+        default=None,
+        help="Optional PNG path to write the preview figure. If omitted, preview mode writes <output-db stem>_preview.png beside the output database path.",
+    )
+    parser.add_argument(
+        "--no-preview-window",
+        action="store_true",
+        help="Write the preview PNG but do not open an interactive matplotlib window.",
     )
     parser.add_argument(
         "--preview-colormap",
@@ -818,6 +833,123 @@ def suppress_low_differences_for_preview(image: np.ndarray, noise_floor: float) 
     return np.sign(image) * np.maximum(np.abs(image) - floor, 0.0)
 
 
+def should_show_preview_window(args: argparse.Namespace) -> bool:
+    if args.no_preview_window:
+        return False
+    backend = plt.get_backend().lower()
+    if backend in {"agg", "pdf", "ps", "svg", "template", "cairo"}:
+        return False
+    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        return False
+    return True
+
+
+def resolve_preview_output_path(output_db: Path, args: argparse.Namespace) -> Path:
+    if args.preview_output is not None:
+        return Path(args.preview_output).expanduser().resolve()
+    return output_db.with_name(f"{output_db.stem}_preview.png")
+
+
+def benchmark_preview_io(
+    reference_file: Path,
+    comparison_file: Path,
+    dataset_path: str,
+    args: argparse.Namespace,
+) -> None:
+    LOGGER.info("Preview I/O benchmark target pair:")
+    LOGGER.info("  previous: %s", reference_file)
+    LOGGER.info("  current : %s", comparison_file)
+
+    stat_start = perf_counter()
+    reference_stat = reference_file.stat()
+    comparison_stat = comparison_file.stat()
+    LOGGER.info(
+        "Metadata stat: %.3fs total (prev %.1f GB, curr %.1f GB)",
+        perf_counter() - stat_start,
+        reference_stat.st_size / (1024 ** 3),
+        comparison_stat.st_size / (1024 ** 3),
+    )
+
+    open_start = perf_counter()
+    with h5py.File(reference_file, "r") as ref_h5:
+        ref_dataset = read_dataset(ref_h5, dataset_path)
+        ref_shape = tuple(int(v) for v in ref_dataset.shape)
+        _ = ref_dataset.dtype
+    with h5py.File(comparison_file, "r") as cmp_h5:
+        cmp_dataset = read_dataset(cmp_h5, dataset_path)
+        cmp_shape = tuple(int(v) for v in cmp_dataset.shape)
+        _ = cmp_dataset.dtype
+    LOGGER.info("HDF5 open + dataset resolve: %.3fs", perf_counter() - open_start)
+    LOGGER.info("Volume shapes: previous=%s current=%s", ref_shape, cmp_shape)
+
+    cropped_shape = volume_shape(reference_file, dataset_path, args.crop_z, args.crop_y, args.crop_x)
+    LOGGER.info("Cropped processing shape: %s", cropped_shape)
+
+    middle_z = cropped_shape[0] // 2
+    slice_start = perf_counter()
+    previous_slice, current_slice = load_slice_pair(
+        reference_file,
+        comparison_file,
+        dataset_path,
+        middle_z,
+        args.crop_z,
+        args.crop_y,
+        args.crop_x,
+    )
+    slice_elapsed = perf_counter() - slice_start
+    slice_bytes = previous_slice.nbytes + current_slice.nbytes
+    LOGGER.info(
+        "Center-slice pair read: %.3fs (%.1f MiB total)",
+        slice_elapsed,
+        slice_bytes / (1024 ** 2),
+    )
+
+    sample_start = perf_counter()
+    sampled = []
+    for index, diff_slice in iter_diff_slices(
+        reference_file,
+        comparison_file,
+        dataset_path,
+        z_indices=[max(0, middle_z - 1), middle_z, min(cropped_shape[0] - 1, middle_z + 1)],
+        crop_z=args.crop_z,
+        crop_y=args.crop_y,
+        crop_x=args.crop_x,
+    ):
+        sampled.append((index, diff_slice.shape, float(np.max(np.abs(diff_slice)))))
+    LOGGER.info("Three full diff-slice reads: %.3fs", perf_counter() - sample_start)
+    for index, shape, peak in sampled:
+        LOGGER.info("  z=%d shape=%s peak_abs_diff=%.6g", index, shape, peak)
+
+    baseline_start = perf_counter()
+    baseline_sigma = estimate_baseline_sigma(
+        reference_file,
+        comparison_file,
+        dataset_path,
+        args.noise_target_samples,
+        args.crop_z,
+        args.crop_y,
+        args.crop_x,
+    )
+    LOGGER.info(
+        "Baseline sigma estimate: %.3fs (sigma=%.6g, threshold=%.6g)",
+        perf_counter() - baseline_start,
+        baseline_sigma,
+        baseline_sigma * args.threshold_sigma,
+    )
+
+    preview_z_start = perf_counter()
+    auto_preview_z = choose_preview_z(
+        reference_file,
+        comparison_file,
+        dataset_path,
+        args.preview_z,
+        args.crop_z,
+        args.crop_y,
+        args.crop_x,
+    )
+    LOGGER.info("Preview-z selection: %.3fs (z=%d)", perf_counter() - preview_z_start, auto_preview_z)
+
+
 def show_detection_preview(
     reference_file: Path,
     comparison_file: Path,
@@ -829,6 +961,7 @@ def show_detection_preview(
     sequence_number: int,
     previous_sequence_number: int,
     args: argparse.Namespace,
+    preview_output_path: Path,
 ) -> None:
     preview_window_radius = 2
     LOGGER.info("Preview render substage: loading center slice pair")
@@ -850,47 +983,22 @@ def show_detection_preview(
     z_stop = min(shape[0], preview_z + preview_window_radius + 1)
     preview_z_indices = list(range(z_start, z_stop))
     LOGGER.info(
-        "Preview render substage: assembling local %d-slice event stack%s",
+        "Preview render substage: assembling local %d-slice event stack serially",
         len(preview_z_indices),
-        f" with {min(args.jobs, len(preview_z_indices), os.cpu_count() or args.jobs)} workers"
-        if args.jobs > 1 and len(preview_z_indices) > 1
-        else "",
     )
     event_stack_start = perf_counter()
-    if args.jobs > 1 and len(preview_z_indices) > 1:
-        preview_chunks = split_indices(preview_z_indices, args.jobs)
-        max_workers = min(args.jobs, len(preview_chunks), os.cpu_count() or args.jobs)
-        preview_slice_results = []
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(
-                    process_diff_chunk_components,
-                    reference_file,
-                    comparison_file,
-                    dataset_path,
-                    chunk,
-                    threshold_value,
-                    args.crop_z,
-                    args.crop_y,
-                    args.crop_x,
-                )
-                for chunk in preview_chunks
-            ]
-            for future in futures:
-                preview_slice_results.extend(future.result())
-    else:
-        preview_slice_results = [
-            process_diff_slice_components(z_index, diff_window_slice, threshold_value)
-            for z_index, diff_window_slice in iter_diff_slices(
-                reference_file,
-                comparison_file,
-                dataset_path,
-                z_indices=preview_z_indices,
-                crop_z=args.crop_z,
-                crop_y=args.crop_y,
-                crop_x=args.crop_x,
-            )
-        ]
+    preview_slice_results = [
+        process_diff_slice_components(z_index, diff_window_slice, threshold_value)
+        for z_index, diff_window_slice in iter_diff_slices(
+            reference_file,
+            comparison_file,
+            dataset_path,
+            z_indices=preview_z_indices,
+            crop_z=args.crop_z,
+            crop_y=args.crop_y,
+            crop_x=args.crop_x,
+        )
+    ]
     merged_events, _preview_max_abs_diff = assemble_events_from_slice_results(
         preview_slice_results,
         min_event_size,
@@ -961,8 +1069,16 @@ def show_detection_preview(
     )
     plt.tight_layout()
     LOGGER.info("Preview render substage complete: figure built in %.1fs", perf_counter() - figure_start)
-    LOGGER.info("Preview render substage: handing figure to matplotlib viewer")
-    plt.show()
+    preview_output_path.parent.mkdir(parents=True, exist_ok=True)
+    save_start = perf_counter()
+    fig.savefig(preview_output_path, dpi=150)
+    LOGGER.info("Preview render substage complete: preview PNG written to %s in %.1fs", preview_output_path, perf_counter() - save_start)
+    if should_show_preview_window(args):
+        LOGGER.info("Preview render substage: handing figure to matplotlib viewer")
+        plt.show()
+    else:
+        LOGGER.info("Preview window skipped because no interactive display backend is available")
+        plt.close(fig)
 
 
 def load_orthogonal_views(
@@ -2014,6 +2130,9 @@ def main() -> int:
     if args.gif_only and args.preview:
         LOGGER.error("--gif-only cannot be used with --preview")
         return 1
+    if args.gif_only and args.benchmark_io:
+        LOGGER.error("--gif-only cannot be used with --benchmark-io")
+        return 1
 
     reference_path = Path(args.reference_path).expanduser()
     output_db_arg = Path(args.output_db).expanduser()
@@ -2032,7 +2151,7 @@ def main() -> int:
             args.crop_y,
             args.crop_x,
         )
-        if args.preview:
+        if args.preview or args.benchmark_io:
             (
                 preview_sequence,
                 preview_dataset_root,
@@ -2058,69 +2177,81 @@ def main() -> int:
                 preview_previous_sequence,
                 preview_previous_dataset_root,
             )
-        if args.absolute_threshold is not None:
-            baseline_sigma = 0.0
-            threshold_value = float(args.absolute_threshold)
-            LOGGER.info("Baseline noise sigma: skipped because --absolute-threshold was provided")
-            LOGGER.info("Detection threshold: %.6g (absolute override)", threshold_value)
-        else:
-            LOGGER.info("Preview stage 1/3: estimating baseline noise from the selected preview pair")
-            baseline_start = perf_counter()
-            baseline_sigma = estimate_baseline_sigma(
+            if args.benchmark_io:
+                benchmark_preview_io(
+                    preview_previous_recon_file,
+                    preview_recon_file,
+                    dataset_path,
+                    args,
+                )
+                LOGGER.info("Preview I/O benchmark complete. No database or CSV written.")
+                return 0
+
+            preview_output_path = resolve_preview_output_path(output_db, args)
+            if args.absolute_threshold is not None:
+                baseline_sigma = 0.0
+                threshold_value = float(args.absolute_threshold)
+                LOGGER.info("Baseline noise sigma: skipped because --absolute-threshold was provided")
+                LOGGER.info("Detection threshold: %.6g (absolute override)", threshold_value)
+            else:
+                LOGGER.info("Preview stage 1/3: estimating baseline noise from the selected preview pair")
+                baseline_start = perf_counter()
+                baseline_sigma = estimate_baseline_sigma(
+                    preview_previous_recon_file,
+                    preview_recon_file,
+                    dataset_path,
+                    args.noise_target_samples,
+                    args.crop_z,
+                    args.crop_y,
+                    args.crop_x,
+                )
+                threshold_value = baseline_sigma * args.threshold_sigma
+                LOGGER.info(
+                    "Preview baseline noise sigma from #%04d minus #%04d: %.6g",
+                    preview_sequence,
+                    preview_previous_sequence,
+                    baseline_sigma,
+                )
+                LOGGER.info("Detection threshold: %.6g", threshold_value)
+                LOGGER.info("Preview stage 1/3 complete in %.1fs", perf_counter() - baseline_start)
+            LOGGER.info("Preview stage 2/3: choosing display z slice")
+            preview_z_start = perf_counter()
+            preview_z = choose_preview_z(
                 preview_previous_recon_file,
                 preview_recon_file,
                 dataset_path,
-                args.noise_target_samples,
+                args.preview_z,
                 args.crop_z,
                 args.crop_y,
                 args.crop_x,
             )
-            threshold_value = baseline_sigma * args.threshold_sigma
+            LOGGER.info("Preview stage 2/3 complete in %.1fs", perf_counter() - preview_z_start)
             LOGGER.info(
-                "Preview baseline noise sigma from #%04d minus #%04d: %.6g",
+                "Showing preview for stepwise comparison #%04d %s minus #%04d %s at z=%s",
                 preview_sequence,
+                preview_dataset_root,
                 preview_previous_sequence,
-                baseline_sigma,
+                preview_previous_dataset_root,
+                preview_z,
             )
-            LOGGER.info("Detection threshold: %.6g", threshold_value)
-            LOGGER.info("Preview stage 1/3 complete in %.1fs", perf_counter() - baseline_start)
-        LOGGER.info("Preview stage 2/3: choosing display z slice")
-        preview_z_start = perf_counter()
-        preview_z = choose_preview_z(
-            preview_previous_recon_file,
-            preview_recon_file,
-            dataset_path,
-            args.preview_z,
-            args.crop_z,
-            args.crop_y,
-            args.crop_x,
-        )
-        LOGGER.info("Preview stage 2/3 complete in %.1fs", perf_counter() - preview_z_start)
-        LOGGER.info(
-            "Showing preview for stepwise comparison #%04d %s minus #%04d %s at z=%s",
-            preview_sequence,
-            preview_dataset_root,
-            preview_previous_sequence,
-            preview_previous_dataset_root,
-            preview_z,
-        )
-        LOGGER.info("Preview stage 3/3: rendering preview window")
-        render_start = perf_counter()
-        show_detection_preview(
-            preview_previous_recon_file,
-            preview_recon_file,
-            dataset_path,
-            threshold_value,
+            LOGGER.info("Preview stage 3/3: rendering preview window")
+            render_start = perf_counter()
+            show_detection_preview(
+                preview_previous_recon_file,
+                preview_recon_file,
+                dataset_path,
+                threshold_value,
                 args.min_event_size,
                 args.merge_gap,
                 preview_z,
-            preview_sequence,
-            preview_previous_sequence,
-            args,
-        )
-        LOGGER.info("Preview stage 3/3 complete in %.1fs", perf_counter() - render_start)
-        LOGGER.info("Preview complete. No database or CSV written.")
-        return 0
+                preview_sequence,
+                preview_previous_sequence,
+                args,
+                preview_output_path,
+            )
+            LOGGER.info("Preview stage 3/3 complete in %.1fs", perf_counter() - render_start)
+            LOGGER.info("Preview complete. No database or CSV written.")
+            return 0
 
         comparisons = build_stepwise_comparisons(
             reference_dataset_root,
