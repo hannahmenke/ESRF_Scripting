@@ -1589,6 +1589,19 @@ def write_gif_file_with_logging(
     return written_path
 
 
+def terminate_process_pool(executor: ProcessPoolExecutor) -> None:
+    processes = getattr(executor, "_processes", None)
+    if not processes:
+        return
+    for process in list(processes.values()):
+        if process is None:
+            continue
+        try:
+            process.terminate()
+        except Exception:
+            continue
+
+
 def save_timeseries_gifs(
     comparisons: list[tuple[int, Path, Path, int, Path, Path]],
     dataset_path: str,
@@ -1716,6 +1729,7 @@ def save_raw_screening_gifs(
     frame_index_to_sequence = {frame_index: dataset_entry[0] for frame_index, dataset_entry in indexed_datasets}
     next_frame_index_to_write = 1
     pending_results: dict[int, dict[str, str] | dict[str, np.ndarray]] = {}
+    completed_successfully = False
 
     LOGGER.info("Opening %d raw screening GIF writer(s)", len(output_paths))
     with TemporaryDirectory(prefix=f"{output_db.stem}_raw_frames_", dir=output_db.parent) as temp_dir:
@@ -1751,8 +1765,8 @@ def save_raw_screening_gifs(
                 max_workers = min(jobs, len(datasets), os.cpu_count() or jobs)
                 LOGGER.info("Running raw GIF screening frame generation with %d process workers", max_workers)
                 executor = ProcessPoolExecutor(max_workers=max_workers)
+                future_to_sequence = {}
                 try:
-                    future_to_sequence = {}
                     next_submit_index = 0
 
                     def submit_dataset(frame_index: int, dataset_entry: tuple[int, Path, Path]) -> None:
@@ -1811,10 +1825,11 @@ def save_raw_screening_gifs(
                             next_frame_index, next_dataset_entry = indexed_datasets[next_submit_index]
                             submit_dataset(next_frame_index, next_dataset_entry)
                             next_submit_index += 1
-                except KeyboardInterrupt:
-                    LOGGER.warning("Cancellation requested. Stopping raw GIF screening workers.")
+                except BaseException:
+                    LOGGER.warning("Raw GIF screening failed or was cancelled. Stopping process workers.")
                     for future in future_to_sequence:
                         future.cancel()
+                    terminate_process_pool(executor)
                     executor.shutdown(wait=False, cancel_futures=True)
                     raise
                 else:
@@ -1850,10 +1865,19 @@ def save_raw_screening_gifs(
                 raise RuntimeError(f"Failed to flush all raw GIF frames in order; remaining scans: {remaining}")
 
             LOGGER.info("All raw screening frames appended. Finalizing %d GIF file(s)", len(output_paths))
+            completed_successfully = True
         finally:
             for plane, writer in writers.items():
                 writer.close()
                 LOGGER.info("Closed GIF writer for %s", plane)
+            if not completed_successfully:
+                for output_path in output_paths:
+                    if output_path.exists():
+                        try:
+                            output_path.unlink()
+                            LOGGER.info("Removed partial GIF %s", output_path)
+                        except OSError:
+                            LOGGER.warning("Failed to remove partial GIF %s", output_path)
 
     return output_paths
 
