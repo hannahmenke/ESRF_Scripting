@@ -27,7 +27,8 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_TARGET_SAMPLE_COUNT = 1_000_000
 DEFAULT_THRESHOLD_SIGMA = 5.0
 DEFAULT_MAX_EVENTS = 100
-DEFAULT_MIN_EVENT_SIZE = 10
+DEFAULT_MIN_EVENT_SIZE = 200
+DEFAULT_MERGE_GAP = 10
 DEFAULT_GIF_FPS = 2
 
 
@@ -130,7 +131,13 @@ def parse_args() -> argparse.Namespace:
         "--min-event-size",
         type=int,
         default=DEFAULT_MIN_EVENT_SIZE,
-        help="Minimum voxel count for an event to be recorded. Default: 10",
+        help="Minimum voxel count for an event to be recorded. Default: 200",
+    )
+    parser.add_argument(
+        "--merge-gap",
+        type=int,
+        default=DEFAULT_MERGE_GAP,
+        help="Merge events whose bounding boxes are separated by at most this many voxels in X/Y. Default: 10",
     )
     parser.add_argument(
         "--max-events",
@@ -176,6 +183,24 @@ def parse_args() -> argparse.Namespace:
         "--preview-diff-colormap",
         default="coolwarm",
         help="Matplotlib colormap for preview difference slices. Default: coolwarm.",
+    )
+    parser.add_argument(
+        "--preview-diff-mode",
+        choices=("raw", "suppressed"),
+        default="suppressed",
+        help="How to render the preview difference image. Default: suppressed.",
+    )
+    parser.add_argument(
+        "--preview-diff-noise-floor",
+        type=float,
+        default=None,
+        help="Absolute deadband around zero for preview diff suppression. Overrides the threshold fraction if provided.",
+    )
+    parser.add_argument(
+        "--preview-diff-floor-fraction",
+        type=float,
+        default=0.5,
+        help="Preview diff suppression floor as a fraction of the detection threshold. Default: 0.5",
     )
     parser.add_argument(
         "--diff-display-min",
@@ -540,6 +565,20 @@ def volume_shape(
     )
 
 
+def crop_offsets_for_volume(
+    recon_file: Path,
+    dataset_path: str,
+    crop_z: str | None = None,
+    crop_y: str | None = None,
+    crop_x: str | None = None,
+) -> tuple[int, int, int]:
+    with h5py.File(recon_file, "r") as h5_file:
+        volume = read_dataset(h5_file, dataset_path)
+        shape = tuple(int(v) for v in volume.shape)
+    z_range, y_range, x_range = crop_ranges_for_shape(shape, crop_z, crop_y, crop_x)
+    return z_range[0], y_range[0], x_range[0]
+
+
 def parse_orthogonal_center(raw_center: str | None, shape: tuple[int, int, int]) -> tuple[int, int, int]:
     if raw_center:
         values = [int(part.strip()) for part in raw_center.split(",") if part.strip()]
@@ -684,17 +723,27 @@ def choose_preview_z(
     return best_z
 
 
+def suppress_low_differences_for_preview(image: np.ndarray, noise_floor: float) -> np.ndarray:
+    image = np.asarray(image, dtype=np.float32)
+    floor = max(float(noise_floor), 0.0)
+    if floor == 0.0:
+        return image
+    return np.sign(image) * np.maximum(np.abs(image) - floor, 0.0)
+
+
 def show_detection_preview(
     reference_file: Path,
     comparison_file: Path,
     dataset_path: str,
     threshold_value: float,
     min_event_size: int,
+    merge_gap: int,
     preview_z: int,
     sequence_number: int,
     previous_sequence_number: int,
     args: argparse.Namespace,
 ) -> None:
+    preview_window_radius = 2
     reference_slice, comparison_slice = load_slice_pair(
         reference_file,
         comparison_file,
@@ -706,10 +755,28 @@ def show_detection_preview(
     )
     diff_slice = comparison_slice - reference_slice
     mask = np.abs(diff_slice) >= threshold_value
-    components = [
-        component
-        for component in find_slice_components(mask, diff_slice, preview_z)
-        if component.voxel_count >= min_event_size
+    shape = volume_shape(reference_file, dataset_path, args.crop_z, args.crop_y, args.crop_x)
+    z_start = max(0, preview_z - preview_window_radius)
+    z_stop = min(shape[0], preview_z + preview_window_radius + 1)
+    preview_slice_results = [
+        process_diff_slice_components(z_index, diff_window_slice, threshold_value)
+        for z_index, diff_window_slice in iter_diff_slices(
+            reference_file,
+            comparison_file,
+            dataset_path,
+            z_indices=list(range(z_start, z_stop)),
+            crop_z=args.crop_z,
+            crop_y=args.crop_y,
+            crop_x=args.crop_x,
+        )
+    ]
+    merged_events, _preview_max_abs_diff = assemble_events_from_slice_results(
+        preview_slice_results,
+        min_event_size,
+        merge_gap,
+    )
+    display_events = [
+        event for event in merged_events if event.z_min <= preview_z <= event.z_max
     ]
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -723,23 +790,38 @@ def show_detection_preview(
     axes[1].set_title(f"Current #{sequence_number:04d}")
     fig.colorbar(current_artist, ax=axes[1], fraction=0.046, pad=0.04)
 
+    diff_display_image = diff_slice
+    diff_title = f"Difference @ z={preview_z}"
+    if args.preview_diff_mode == "suppressed":
+        noise_floor = (
+            float(args.preview_diff_noise_floor)
+            if args.preview_diff_noise_floor is not None
+            else float(args.preview_diff_floor_fraction) * float(threshold_value)
+        )
+        diff_display_image = suppress_low_differences_for_preview(diff_slice, noise_floor)
+        diff_title = f"Suppressed difference @ z={preview_z} (floor={noise_floor:.6g})"
+
     diff_artist = axes[2].imshow(
-        diff_slice,
+        diff_display_image,
         cmap=args.preview_diff_colormap,
         vmin=args.diff_display_min,
         vmax=args.diff_display_max,
     )
-    axes[2].set_title(f"Difference @ z={preview_z}")
+    axes[2].set_title(diff_title)
     fig.colorbar(diff_artist, ax=axes[2], fraction=0.046, pad=0.04)
 
-    mask_artist = axes[3].imshow(mask, cmap="gray")
-    axes[3].set_title(f"Threshold mask ({len(components)} events on slice)")
+    axes[3].imshow(reference_slice, cmap=args.preview_colormap, alpha=0.35)
+    mask_overlay = np.ma.masked_where(~mask, mask.astype(np.float32))
+    mask_artist = axes[3].imshow(mask_overlay, cmap="autumn", alpha=0.7, vmin=0.0, vmax=1.0)
+    axes[3].set_title(
+        f"Threshold mask over reference ({len(display_events)} events on shown slice)"
+    )
     fig.colorbar(mask_artist, ax=axes[3], fraction=0.046, pad=0.04)
-    for component in components:
-        width = component.x_max - component.x_min + 1
-        height = component.y_max - component.y_min + 1
+    for event in display_events:
+        width = event.x_max - event.x_min + 1
+        height = event.y_max - event.y_min + 1
         rectangle = plt.Rectangle(
-            (component.x_min, component.y_min),
+            (event.x_min, event.y_min),
             width,
             height,
             fill=False,
@@ -750,7 +832,8 @@ def show_detection_preview(
 
     fig.suptitle(
         f"Stepwise event preview: #{sequence_number:04d} minus #{previous_sequence_number:04d}\n"
-        f"threshold={threshold_value:.6g}, min_event_size={min_event_size}, z={preview_z}"
+        f"threshold={threshold_value:.6g}, min_event_size={min_event_size}, merge_gap={merge_gap}, "
+        f"showing z={preview_z} with local stack {z_start}:{z_stop}"
     )
     plt.tight_layout()
     plt.show()
@@ -1137,12 +1220,79 @@ def process_diff_chunk_components(
     ]
 
 
-def bboxes_touch(a: Event3D, b: SliceComponent) -> bool:
+def assemble_events_from_slice_results(
+    slice_results: list[tuple[int, list[SliceComponent], float]],
+    min_event_size: int,
+    merge_gap: int,
+) -> tuple[list[Event3D], float]:
+    all_events: list[Event3D] = []
+    active_events: dict[int, Event3D] = {}
+    next_event_id = 1
+    max_abs_diff = 0.0
+
+    for z_index, components, slice_max_abs_diff in sorted(slice_results, key=lambda item: item[0]):
+        max_abs_diff = max(max_abs_diff, slice_max_abs_diff)
+        current_active_ids: set[int] = set()
+
+        for component in components:
+            matching_ids = [
+                event_id
+                for event_id, event in active_events.items()
+                if event.last_z == z_index - 1 and bboxes_touch(event, component, merge_gap)
+            ]
+
+            if not matching_ids:
+                event = Event3D(
+                    event_id=next_event_id,
+                    z_min=component.z_index,
+                    z_max=component.z_index,
+                    y_min=component.y_min,
+                    y_max=component.y_max,
+                    x_min=component.x_min,
+                    x_max=component.x_max,
+                    voxel_count=0,
+                    peak_abs_diff=0.0,
+                    peak_signed_diff=0.0,
+                    sum_abs_diff=0.0,
+                    sum_signed_diff=0.0,
+                    z_weighted_sum=0.0,
+                    y_weighted_sum=0.0,
+                    x_weighted_sum=0.0,
+                    last_z=component.z_index,
+                )
+                absorb_component(event, component)
+                active_events[event.event_id] = event
+                current_active_ids.add(event.event_id)
+                next_event_id += 1
+                continue
+
+            primary_id = matching_ids[0]
+            primary_event = active_events[primary_id]
+            for merge_id in matching_ids[1:]:
+                if merge_id == primary_id or merge_id not in active_events:
+                    continue
+                merge_events(primary_event, active_events[merge_id])
+                del active_events[merge_id]
+                current_active_ids.discard(merge_id)
+            absorb_component(primary_event, component)
+            current_active_ids.add(primary_id)
+
+        finished_ids = [event_id for event_id in active_events if event_id not in current_active_ids]
+        for event_id in finished_ids:
+            all_events.append(active_events.pop(event_id))
+
+    all_events.extend(active_events.values())
+    filtered_events = [event for event in all_events if event.voxel_count >= min_event_size]
+    filtered_events.sort(key=lambda event: event.peak_abs_diff, reverse=True)
+    return filtered_events, max_abs_diff
+
+
+def bboxes_touch(a: Event3D, b: SliceComponent, merge_gap: int = 1) -> bool:
     return not (
-        a.y_max + 1 < b.y_min
-        or b.y_max + 1 < a.y_min
-        or a.x_max + 1 < b.x_min
-        or b.x_max + 1 < a.x_min
+        a.y_max + merge_gap < b.y_min
+        or b.y_max + merge_gap < a.y_min
+        or a.x_max + merge_gap < b.x_min
+        or b.x_max + merge_gap < a.x_min
     )
 
 
@@ -1199,15 +1349,12 @@ def detect_events_for_comparison(
     dataset_path: str,
     threshold_value: float,
     min_event_size: int,
+    merge_gap: int,
     jobs: int = 1,
     crop_z: str | None = None,
     crop_y: str | None = None,
     crop_x: str | None = None,
 ) -> tuple[list[Event3D], float]:
-    all_events: list[Event3D] = []
-    active_events: dict[int, Event3D] = {}
-    next_event_id = 1
-    max_abs_diff = 0.0
     slice_results: list[tuple[int, list[SliceComponent], float]]
 
     if jobs <= 1:
@@ -1241,62 +1388,7 @@ def detect_events_for_comparison(
                 )
             )
         slice_results = [item for chunk in chunk_results for item in chunk]
-
-    for z_index, components, slice_max_abs_diff in sorted(slice_results, key=lambda item: item[0]):
-        max_abs_diff = max(max_abs_diff, slice_max_abs_diff)
-        current_active_ids: set[int] = set()
-
-        for component in components:
-            matching_ids = [
-                event_id
-                for event_id, event in active_events.items()
-                if event.last_z == z_index - 1 and bboxes_touch(event, component)
-            ]
-
-            if not matching_ids:
-                event = Event3D(
-                    event_id=next_event_id,
-                    z_min=component.z_index,
-                    z_max=component.z_index,
-                    y_min=component.y_min,
-                    y_max=component.y_max,
-                    x_min=component.x_min,
-                    x_max=component.x_max,
-                    voxel_count=0,
-                    peak_abs_diff=0.0,
-                    peak_signed_diff=0.0,
-                    sum_abs_diff=0.0,
-                    sum_signed_diff=0.0,
-                    z_weighted_sum=0.0,
-                    y_weighted_sum=0.0,
-                    x_weighted_sum=0.0,
-                    last_z=component.z_index,
-                )
-                absorb_component(event, component)
-                active_events[event.event_id] = event
-                current_active_ids.add(event.event_id)
-                next_event_id += 1
-                continue
-
-            primary_id = matching_ids[0]
-            primary_event = active_events[primary_id]
-            for merge_id in matching_ids[1:]:
-                if merge_id == primary_id or merge_id not in active_events:
-                    continue
-                merge_events(primary_event, active_events[merge_id])
-                del active_events[merge_id]
-                current_active_ids.discard(merge_id)
-            absorb_component(primary_event, component)
-            current_active_ids.add(primary_id)
-
-        finished_ids = [event_id for event_id in active_events if event_id not in current_active_ids]
-        for event_id in finished_ids:
-            all_events.append(active_events.pop(event_id))
-
-    all_events.extend(active_events.values())
-    filtered_events = [event for event in all_events if event.voxel_count >= min_event_size]
-    filtered_events.sort(key=lambda event: event.peak_abs_diff, reverse=True)
-    return filtered_events, max_abs_diff
+    return assemble_events_from_slice_results(slice_results, min_event_size, merge_gap)
 
 
 def process_comparison_task(
@@ -1304,6 +1396,7 @@ def process_comparison_task(
     dataset_path: str,
     threshold_value: float,
     min_event_size: int,
+    merge_gap: int,
     jobs: int,
     crop_z: str | None,
     crop_y: str | None,
@@ -1316,6 +1409,7 @@ def process_comparison_task(
         dataset_path,
         threshold_value,
         min_event_size,
+        merge_gap,
         jobs,
         crop_z,
         crop_y,
@@ -1353,6 +1447,10 @@ def initialize_database(db_path: Path) -> sqlite3.Connection:
             threshold_sigma REAL NOT NULL,
             threshold_value REAL NOT NULL,
             min_event_size INTEGER NOT NULL,
+            merge_gap INTEGER NOT NULL,
+            crop_z_start INTEGER NOT NULL DEFAULT 0,
+            crop_y_start INTEGER NOT NULL DEFAULT 0,
+            crop_x_start INTEGER NOT NULL DEFAULT 0,
             max_events INTEGER NOT NULL
         )
         """
@@ -1397,6 +1495,15 @@ def initialize_database(db_path: Path) -> sqlite3.Connection:
             y_max INTEGER NOT NULL,
             x_min INTEGER NOT NULL,
             x_max INTEGER NOT NULL,
+            full_z_centroid REAL,
+            full_y_centroid REAL,
+            full_x_centroid REAL,
+            full_z_min INTEGER,
+            full_z_max INTEGER,
+            full_y_min INTEGER,
+            full_y_max INTEGER,
+            full_x_min INTEGER,
+            full_x_max INTEGER,
             FOREIGN KEY (comparison_id) REFERENCES comparisons(id)
         )
         """
@@ -1404,10 +1511,42 @@ def initialize_database(db_path: Path) -> sqlite3.Connection:
     existing_columns = {
         row[1] for row in connection.execute("PRAGMA table_info(comparisons)")
     }
+    run_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(runs)")
+    }
+    event_columns = {
+        row[1] for row in connection.execute("PRAGMA table_info(events)")
+    }
+    if "merge_gap" not in run_columns:
+        connection.execute(f"ALTER TABLE runs ADD COLUMN merge_gap INTEGER NOT NULL DEFAULT {DEFAULT_MERGE_GAP}")
+    if "crop_z_start" not in run_columns:
+        connection.execute("ALTER TABLE runs ADD COLUMN crop_z_start INTEGER NOT NULL DEFAULT 0")
+    if "crop_y_start" not in run_columns:
+        connection.execute("ALTER TABLE runs ADD COLUMN crop_y_start INTEGER NOT NULL DEFAULT 0")
+    if "crop_x_start" not in run_columns:
+        connection.execute("ALTER TABLE runs ADD COLUMN crop_x_start INTEGER NOT NULL DEFAULT 0")
     if "previous_reconstruction_mtime" not in existing_columns:
         connection.execute("ALTER TABLE comparisons ADD COLUMN previous_reconstruction_mtime TEXT")
     if "reconstruction_mtime" not in existing_columns:
         connection.execute("ALTER TABLE comparisons ADD COLUMN reconstruction_mtime TEXT")
+    if "full_z_centroid" not in event_columns:
+        connection.execute("ALTER TABLE events ADD COLUMN full_z_centroid REAL")
+    if "full_y_centroid" not in event_columns:
+        connection.execute("ALTER TABLE events ADD COLUMN full_y_centroid REAL")
+    if "full_x_centroid" not in event_columns:
+        connection.execute("ALTER TABLE events ADD COLUMN full_x_centroid REAL")
+    if "full_z_min" not in event_columns:
+        connection.execute("ALTER TABLE events ADD COLUMN full_z_min INTEGER")
+    if "full_z_max" not in event_columns:
+        connection.execute("ALTER TABLE events ADD COLUMN full_z_max INTEGER")
+    if "full_y_min" not in event_columns:
+        connection.execute("ALTER TABLE events ADD COLUMN full_y_min INTEGER")
+    if "full_y_max" not in event_columns:
+        connection.execute("ALTER TABLE events ADD COLUMN full_y_max INTEGER")
+    if "full_x_min" not in event_columns:
+        connection.execute("ALTER TABLE events ADD COLUMN full_x_min INTEGER")
+    if "full_x_max" not in event_columns:
+        connection.execute("ALTER TABLE events ADD COLUMN full_x_max INTEGER")
     connection.commit()
     return connection
 
@@ -1425,7 +1564,9 @@ def insert_run(
     args: argparse.Namespace,
     baseline_sigma: float,
     threshold_value: float,
+    crop_offsets: tuple[int, int, int],
 ) -> int:
+    crop_z_start, crop_y_start, crop_x_start = crop_offsets
     cursor = connection.execute(
         """
         INSERT INTO runs (
@@ -1439,8 +1580,12 @@ def insert_run(
             threshold_sigma,
             threshold_value,
             min_event_size,
+            merge_gap,
+            crop_z_start,
+            crop_y_start,
+            crop_x_start,
             max_events
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(reference_path),
@@ -1453,6 +1598,10 @@ def insert_run(
             args.threshold_sigma,
             threshold_value,
             args.min_event_size,
+            args.merge_gap,
+            crop_z_start,
+            crop_y_start,
+            crop_x_start,
             args.max_events,
         ),
     )
@@ -1472,7 +1621,9 @@ def insert_comparison_result(
     events: list[Event3D],
     stored_events: list[Event3D],
     max_abs_diff: float,
+    crop_offsets: tuple[int, int, int],
 ) -> None:
+    crop_z_start, crop_y_start, crop_x_start = crop_offsets
     cursor = connection.execute(
         """
         INSERT INTO comparisons (
@@ -1509,6 +1660,9 @@ def insert_comparison_result(
 
     for rank, event in enumerate(stored_events, start=1):
         z_centroid, y_centroid, x_centroid = event_centroid(event)
+        full_z_centroid = z_centroid + crop_z_start
+        full_y_centroid = y_centroid + crop_y_start
+        full_x_centroid = x_centroid + crop_x_start
         connection.execute(
             """
             INSERT INTO events (
@@ -1527,8 +1681,17 @@ def insert_comparison_result(
                 y_min,
                 y_max,
                 x_min,
-                x_max
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                x_max,
+                full_z_centroid,
+                full_y_centroid,
+                full_x_centroid,
+                full_z_min,
+                full_z_max,
+                full_y_min,
+                full_y_max,
+                full_x_min,
+                full_x_max
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 comparison_id,
@@ -1547,6 +1710,15 @@ def insert_comparison_result(
                 event.y_max,
                 event.x_min,
                 event.x_max,
+                full_z_centroid,
+                full_y_centroid,
+                full_x_centroid,
+                event.z_min + crop_z_start,
+                event.z_max + crop_z_start,
+                event.y_min + crop_y_start,
+                event.y_max + crop_y_start,
+                event.x_min + crop_x_start,
+                event.x_max + crop_x_start,
             ),
         )
     connection.commit()
@@ -1579,7 +1751,16 @@ def export_events_csv(connection: sqlite3.Connection, run_id: int, output_db: Pa
             e.y_min,
             e.y_max,
             e.x_min,
-            e.x_max
+            e.x_max,
+            e.full_z_centroid,
+            e.full_y_centroid,
+            e.full_x_centroid,
+            e.full_z_min,
+            e.full_z_max,
+            e.full_y_min,
+            e.full_y_max,
+            e.full_x_min,
+            e.full_x_max
         FROM events e
         JOIN comparisons c ON c.id = e.comparison_id
         WHERE c.run_id = ?
@@ -1611,6 +1792,15 @@ def export_events_csv(connection: sqlite3.Connection, run_id: int, output_db: Pa
         "y_max",
         "x_min",
         "x_max",
+        "full_z_centroid",
+        "full_y_centroid",
+        "full_x_centroid",
+        "full_z_min",
+        "full_z_max",
+        "full_y_min",
+        "full_y_max",
+        "full_x_min",
+        "full_x_max",
     ]
     with output_csv.open("w", newline="") as handle:
         writer = csv.writer(handle)
@@ -1629,8 +1819,17 @@ def main() -> int:
     if args.absolute_threshold is not None and args.absolute_threshold <= 0:
         LOGGER.error("--absolute-threshold must be > 0")
         return 1
+    if args.preview_diff_noise_floor is not None and args.preview_diff_noise_floor < 0:
+        LOGGER.error("--preview-diff-noise-floor must be >= 0")
+        return 1
+    if args.preview_diff_floor_fraction < 0:
+        LOGGER.error("--preview-diff-floor-fraction must be >= 0")
+        return 1
     if args.min_event_size <= 0:
         LOGGER.error("--min-event-size must be > 0")
+        return 1
+    if args.merge_gap < 0:
+        LOGGER.error("--merge-gap must be >= 0")
         return 1
     if args.max_events <= 0:
         LOGGER.error("--max-events must be > 0")
@@ -1658,6 +1857,13 @@ def main() -> int:
         else:
             output_db = (reference_dataset_root.parent / output_db_arg).resolve()
         dataset_path = resolve_volume_dataset(reference_recon_file, args.dataset_path)
+        crop_offsets = crop_offsets_for_volume(
+            reference_recon_file,
+            dataset_path,
+            args.crop_z,
+            args.crop_y,
+            args.crop_x,
+        )
         comparisons = build_stepwise_comparisons(
             reference_dataset_root,
             args.start_number,
@@ -1768,6 +1974,7 @@ def main() -> int:
                 dataset_path,
                 threshold_value,
                 args.min_event_size,
+                args.merge_gap,
                 preview_z,
                 preview_sequence,
                 preview_previous_sequence,
@@ -1787,6 +1994,7 @@ def main() -> int:
                 args,
                 baseline_sigma,
                 threshold_value,
+                crop_offsets,
             )
 
             for comparison in comparisons:
@@ -1816,6 +2024,7 @@ def main() -> int:
                     dataset_path,
                     threshold_value,
                     args.min_event_size,
+                    args.merge_gap,
                     args.jobs,
                     args.crop_z,
                     args.crop_y,
@@ -1834,6 +2043,7 @@ def main() -> int:
                     events,
                     stored_events,
                     max_abs_diff,
+                    crop_offsets,
                 )
                 LOGGER.info(
                     "Recorded %s events (%s stored) for #%04d, max abs diff %.6g",
