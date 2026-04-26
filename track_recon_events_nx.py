@@ -1392,15 +1392,27 @@ def normalize_frame(
     return rgb
 
 
+def annotation_font_for_image(image: np.ndarray) -> ImageFont.ImageFont:
+    height = int(image.shape[0]) if image.ndim >= 2 else 0
+    width = int(image.shape[1]) if image.ndim >= 2 else 0
+    font_size = max(18, min(48, max(height, width) // 28))
+    for font_name in ("DejaVuSans-Bold.ttf", "DejaVuSans.ttf", "Arial.ttf"):
+        try:
+            return ImageFont.truetype(font_name, font_size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
 def annotate_frame(image: np.ndarray, text: str) -> np.ndarray:
     if image.ndim == 2:
         pil_image = Image.fromarray(image, mode="L").convert("RGB")
     else:
         pil_image = Image.fromarray(image, mode="RGB")
     draw = ImageDraw.Draw(pil_image, "RGBA")
-    font = ImageFont.load_default()
+    font = annotation_font_for_image(image)
     left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
-    padding = 4
+    padding = max(6, max((right - left), (bottom - top)) // 10)
     box = (
         8,
         8,
