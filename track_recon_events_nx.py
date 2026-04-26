@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 import csv
 from datetime import datetime, timezone
 import logging
@@ -1597,29 +1597,52 @@ def save_raw_screening_gifs(
 ) -> list[Path]:
     frame_sets: dict[str, list[np.ndarray]] = {}
     output_paths: list[Path] = []
+    total_datasets = len(datasets)
 
     if jobs > 1 and len(datasets) > 1:
         max_workers = min(jobs, len(datasets), os.cpu_count() or jobs)
         LOGGER.info("Running raw GIF screening frame generation in parallel with %d workers", max_workers)
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            task_results = list(
-                executor.map(
+            future_to_sequence = {
+                executor.submit(
                     build_raw_gif_frames_for_dataset,
-                    datasets,
-                    [dataset_path] * len(datasets),
-                    [center] * len(datasets),
-                    [planes] * len(datasets),
-                    [downsample] * len(datasets),
-                    [labels] * len(datasets),
-                    [raw_colormap] * len(datasets),
-                    [crop_z] * len(datasets),
-                    [crop_y] * len(datasets),
-                    [crop_x] * len(datasets),
+                    dataset_entry,
+                    dataset_path,
+                    center,
+                    planes,
+                    downsample,
+                    labels,
+                    raw_colormap,
+                    crop_z,
+                    crop_y,
+                    crop_x,
+                ): dataset_entry[0]
+                for dataset_entry in datasets
+            }
+            task_results = []
+            completed = 0
+            for future in as_completed(future_to_sequence):
+                sequence_number = future_to_sequence[future]
+                completed += 1
+                LOGGER.info(
+                    "Rendered raw GIF frame %d/%d for scan #%04d",
+                    completed,
+                    total_datasets,
+                    sequence_number,
                 )
-            )
+                task_results.append(future.result())
     else:
-        task_results = [
-            build_raw_gif_frames_for_dataset(
+        task_results = []
+        for index, dataset_entry in enumerate(datasets, start=1):
+            sequence_number = dataset_entry[0]
+            LOGGER.info(
+                "Rendering raw GIF frame %d/%d for scan #%04d",
+                index,
+                total_datasets,
+                sequence_number,
+            )
+            task_results.append(
+                build_raw_gif_frames_for_dataset(
                 dataset_entry,
                 dataset_path,
                 center,
@@ -1631,8 +1654,7 @@ def save_raw_screening_gifs(
                 crop_y,
                 crop_x,
             )
-            for dataset_entry in datasets
-        ]
+            )
 
     task_results.sort(key=lambda item: item[0])
     for _sequence_number, frames in task_results:
