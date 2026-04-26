@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 import logging
 import math
 import os
+import platform
 import re
+import shutil
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -851,12 +853,59 @@ def resolve_preview_output_path(output_db: Path, args: argparse.Namespace) -> Pa
     return output_db.with_name(f"{output_db.stem}_preview.png")
 
 
+def log_process_diagnostics(output_db: Path, preview_output_path: Path | None, args: argparse.Namespace) -> None:
+    pid = os.getpid()
+    LOGGER.info("Process diagnostics:")
+    LOGGER.info("  pid=%d ppid=%d host=%s", pid, os.getppid(), platform.node() or "unknown")
+    LOGGER.info(
+        "  platform=%s python=%s cpu_count=%s cwd=%s",
+        platform.platform(),
+        sys.version.split()[0],
+        os.cpu_count(),
+        Path.cwd(),
+    )
+    LOGGER.info(
+        "  matplotlib_backend=%s DISPLAY=%s WAYLAND_DISPLAY=%s MPLBACKEND=%s",
+        plt.get_backend(),
+        os.environ.get("DISPLAY"),
+        os.environ.get("WAYLAND_DISPLAY"),
+        os.environ.get("MPLBACKEND"),
+    )
+    LOGGER.info(
+        "  jobs=%d noise_target_samples=%d crop_z=%s crop_y=%s crop_x=%s",
+        args.jobs,
+        args.noise_target_samples,
+        args.crop_z,
+        args.crop_y,
+        args.crop_x,
+    )
+    LOGGER.info("  output_db=%s", output_db)
+    if preview_output_path is not None:
+        LOGGER.info("  preview_output=%s", preview_output_path)
+
+    suggested_commands = [
+        f"top -H -p {pid}",
+        f"strace -tt -f -p {pid}",
+        f"strace -c -f -p {pid}",
+        f"pidstat -d -p {pid} 1",
+    ]
+    if shutil.which("py-spy"):
+        suggested_commands.append(f"py-spy dump --pid {pid}")
+        suggested_commands.append(f"py-spy top --pid {pid}")
+    LOGGER.info("Live process inspection commands:")
+    for command in suggested_commands:
+        LOGGER.info("  %s", command)
+
+
 def benchmark_preview_io(
     reference_file: Path,
     comparison_file: Path,
     dataset_path: str,
+    output_db: Path,
+    preview_output_path: Path,
     args: argparse.Namespace,
 ) -> None:
+    log_process_diagnostics(output_db, preview_output_path, args)
     LOGGER.info("Preview I/O benchmark target pair:")
     LOGGER.info("  previous: %s", reference_file)
     LOGGER.info("  current : %s", comparison_file)
@@ -957,18 +1006,27 @@ def benchmark_preview_io(
     preview_z_indices = list(range(z_start, z_stop))
 
     event_stack_start = perf_counter()
-    preview_slice_results = [
-        process_diff_slice_components(z_index, diff_window_slice, threshold_value)
-        for z_index, diff_window_slice in iter_diff_slices(
-            reference_file,
-            comparison_file,
-            dataset_path,
-            z_indices=preview_z_indices,
-            crop_z=args.crop_z,
-            crop_y=args.crop_y,
-            crop_x=args.crop_x,
+    preview_slice_results = []
+    for z_index, diff_window_slice in iter_diff_slices(
+        reference_file,
+        comparison_file,
+        dataset_path,
+        z_indices=preview_z_indices,
+        crop_z=args.crop_z,
+        crop_y=args.crop_y,
+        crop_x=args.crop_x,
+    ):
+        slice_component_start = perf_counter()
+        slice_result = process_diff_slice_components(z_index, diff_window_slice, threshold_value)
+        preview_slice_results.append(slice_result)
+        _slice_z, slice_components, slice_max_abs_diff = slice_result
+        LOGGER.info(
+            "  preview stack slice z=%d: %.3fs, components=%d, peak_abs_diff=%.6g",
+            z_index,
+            perf_counter() - slice_component_start,
+            len(slice_components),
+            slice_max_abs_diff,
         )
-    ]
     merged_events, _preview_max_abs_diff = assemble_events_from_slice_results(
         preview_slice_results,
         args.min_event_size,
@@ -2250,17 +2308,19 @@ def main() -> int:
                 preview_previous_sequence,
                 preview_previous_dataset_root,
             )
+            preview_output_path = resolve_preview_output_path(output_db, args)
             if args.benchmark_io:
                 benchmark_preview_io(
                     preview_previous_recon_file,
                     preview_recon_file,
                     dataset_path,
+                    output_db,
+                    preview_output_path,
                     args,
                 )
                 LOGGER.info("Preview I/O benchmark complete. No database or CSV written.")
                 return 0
 
-            preview_output_path = resolve_preview_output_path(output_db, args)
             if args.absolute_threshold is not None:
                 baseline_sigma = 0.0
                 threshold_value = float(args.absolute_threshold)
