@@ -598,6 +598,46 @@ def list_series_dataset_roots(
     return results
 
 
+def log_requested_range_audit(
+    reference_dataset_root: Path,
+    start_number: int,
+    stop_number: int,
+    admitted_sequence_numbers: set[int],
+    skipped_scans: set[int] | None = None,
+) -> None:
+    skipped_scans = skipped_scans or set()
+    low = min(start_number, stop_number)
+    high = max(start_number, stop_number)
+    requested_numbers = set(range(low, high + 1))
+    unskipped_requested_numbers = requested_numbers - skipped_scans
+    series_root_numbers = {
+        sequence_number
+        for sequence_number, _dataset_root in list_series_dataset_roots(reference_dataset_root)
+        if low <= sequence_number <= high
+    }
+    missing_root_numbers = sorted(unskipped_requested_numbers - series_root_numbers)
+    unresolved_numbers = sorted(series_root_numbers - admitted_sequence_numbers - skipped_scans)
+
+    if missing_root_numbers:
+        LOGGER.warning(
+            "Requested scan numbers with no dataset directory in range: %s",
+            ", ".join(f"#{sequence_number:04d}" for sequence_number in missing_root_numbers),
+        )
+    if unresolved_numbers:
+        LOGGER.warning(
+            "Requested scan numbers present as dataset directories but excluded from processing due to missing/invalid reconstructions: %s",
+            ", ".join(f"#{sequence_number:04d}" for sequence_number in unresolved_numbers),
+        )
+    if high in skipped_scans:
+        LOGGER.warning("Requested stop scan #%04d is excluded by --skip-scans", high)
+    elif high in admitted_sequence_numbers:
+        LOGGER.info("Requested stop scan #%04d is admitted for processing", high)
+    elif high in missing_root_numbers:
+        LOGGER.warning("Requested stop scan #%04d has no dataset directory", high)
+    elif high in unresolved_numbers:
+        LOGGER.warning("Requested stop scan #%04d exists but has no valid reconstruction to process", high)
+
+
 def build_stepwise_comparisons(
     reference_dataset_root: Path,
     start_number: int,
@@ -2698,6 +2738,13 @@ def main() -> int:
             ]
             if not screening_datasets:
                 raise RuntimeError("No reconstruction scans found in the requested range for raw GIF screening")
+            log_requested_range_audit(
+                reference_dataset_root,
+                args.start_number,
+                args.stop_number,
+                {sequence_number for sequence_number, _dataset_root, _recon_file in screening_datasets},
+                skipped_scans,
+            )
 
             LOGGER.info("GIF screening mode enabled: raw-only export with no baseline estimation or event processing")
             LOGGER.info(
@@ -2744,6 +2791,22 @@ def main() -> int:
         )
         if not comparisons:
             raise RuntimeError("No stepwise comparison reconstructions found in the requested range")
+        log_requested_range_audit(
+            reference_dataset_root,
+            args.start_number,
+            args.stop_number,
+            {
+                sequence_number
+                for sequence_number, _dataset_root, _recon_file, _previous_sequence, _previous_dataset_root, _previous_recon_file
+                in comparisons
+            }
+            | {
+                previous_sequence
+                for _sequence_number, _dataset_root, _recon_file, previous_sequence, _previous_dataset_root, _previous_recon_file
+                in comparisons
+            },
+            skipped_scans,
+        )
 
         LOGGER.info(
             "Processing sequence order: %s",
