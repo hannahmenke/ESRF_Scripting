@@ -27,7 +27,7 @@ LOGGER = logging.getLogger(__name__)
 DEFAULT_TARGET_SAMPLE_COUNT = 1_000_000
 DEFAULT_THRESHOLD_SIGMA = 5.0
 DEFAULT_MAX_EVENTS = 100
-DEFAULT_MIN_EVENT_SIZE = 200
+DEFAULT_MIN_EVENT_SIZE = 1000
 DEFAULT_MERGE_GAP = 10
 DEFAULT_GIF_FPS = 2
 
@@ -131,7 +131,7 @@ def parse_args() -> argparse.Namespace:
         "--min-event-size",
         type=int,
         default=DEFAULT_MIN_EVENT_SIZE,
-        help="Minimum voxel count for an event to be recorded. Default: 200",
+        help="Minimum voxel count for an event to be recorded. Default: 1000",
     )
     parser.add_argument(
         "--merge-gap",
@@ -182,25 +182,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--preview-diff-colormap",
         default="coolwarm",
-        help="Matplotlib colormap for preview difference slices. Default: coolwarm.",
+        help="Matplotlib colormap for preview and GIF difference slices. Default: coolwarm.",
     )
     parser.add_argument(
         "--preview-diff-mode",
         choices=("raw", "suppressed"),
         default="suppressed",
-        help="How to render the preview difference image. Default: suppressed.",
+        help="How to render preview and GIF difference images. Default: suppressed.",
     )
     parser.add_argument(
         "--preview-diff-noise-floor",
         type=float,
         default=None,
-        help="Absolute deadband around zero for preview diff suppression. Overrides the threshold fraction if provided.",
+        help="Absolute deadband around zero for preview/GIF diff suppression. Overrides the threshold fraction if provided.",
     )
     parser.add_argument(
         "--preview-diff-floor-fraction",
         type=float,
         default=0.5,
-        help="Preview diff suppression floor as a fraction of the detection threshold. Default: 0.5",
+        help="Preview/GIF diff suppression floor as a fraction of the detection threshold. Default: 0.5",
     )
     parser.add_argument(
         "--diff-display-min",
@@ -222,7 +222,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gif-only",
         action="store_true",
-        help="Export GIFs and exit without estimating thresholds, detecting events, or writing the SQLite/CSV outputs.",
+        help="Export GIFs and exit without detecting events or writing the SQLite/CSV outputs.",
     )
     parser.add_argument(
         "--gif-labels",
@@ -922,6 +922,21 @@ def annotate_frame(image: np.ndarray, text: str) -> np.ndarray:
     return np.asarray(pil_image)
 
 
+def stack_frames_horizontally(left: np.ndarray, right: np.ndarray, separator_width: int = 4) -> np.ndarray:
+    if left.ndim == 2:
+        left = np.repeat(left[..., None], 3, axis=2)
+    if right.ndim == 2:
+        right = np.repeat(right[..., None], 3, axis=2)
+    height = max(left.shape[0], right.shape[0])
+    left_width = left.shape[1]
+    right_width = right.shape[1]
+    output = np.zeros((height, left_width + separator_width + right_width, 3), dtype=np.uint8)
+    output[: left.shape[0], :left_width] = left
+    output[: right.shape[0], left_width + separator_width :] = right
+    output[:, left_width:left_width + separator_width] = 255
+    return output
+
+
 def build_gif_frames_for_plane(
     comparison: tuple[int, Path, Path, int, Path, Path],
     dataset_path: str,
@@ -934,6 +949,10 @@ def build_gif_frames_for_plane(
     diff_colormap: str,
     diff_display_min: float,
     diff_display_max: float,
+    preview_diff_mode: str,
+    preview_diff_noise_floor: float | None,
+    preview_diff_floor_fraction: float,
+    threshold_value: float | None,
     crop_z: str | None,
     crop_y: str | None,
     crop_x: str | None,
@@ -946,13 +965,24 @@ def build_gif_frames_for_plane(
 
     if mode in {"raw", "both"}:
         key = f"{plane}_raw"
-        frame = normalize_frame(current_views[plane], raw_colormap)
+        previous_frame = normalize_frame(previous_views[plane], raw_colormap)
+        current_frame = normalize_frame(current_views[plane], raw_colormap)
+        frame = stack_frames_horizontally(previous_frame, current_frame)
         if labels:
             frame = annotate_frame(frame, label)
         frames[key] = frame
     if mode in {"diff", "both"}:
         key = f"{plane}_diff"
         diff_view = current_views[plane] - previous_views[plane]
+        if preview_diff_mode == "suppressed":
+            if threshold_value is None and preview_diff_noise_floor is None:
+                raise RuntimeError("Threshold value is required for suppressed GIF diff rendering")
+            noise_floor = (
+                float(preview_diff_noise_floor)
+                if preview_diff_noise_floor is not None
+                else float(preview_diff_floor_fraction) * float(threshold_value)
+            )
+            diff_view = suppress_low_differences_for_preview(diff_view, noise_floor)
         frame = normalize_frame(
             diff_view,
             diff_colormap,
@@ -985,6 +1015,10 @@ def save_timeseries_gifs(
     diff_colormap: str,
     diff_display_min: float,
     diff_display_max: float,
+    preview_diff_mode: str,
+    preview_diff_noise_floor: float | None,
+    preview_diff_floor_fraction: float,
+    threshold_value: float | None,
     crop_z: str | None,
     crop_y: str | None,
     crop_x: str | None,
@@ -1011,6 +1045,10 @@ def save_timeseries_gifs(
                     [diff_colormap] * len(plane_tasks),
                     [diff_display_min] * len(plane_tasks),
                     [diff_display_max] * len(plane_tasks),
+                    [preview_diff_mode] * len(plane_tasks),
+                    [preview_diff_noise_floor] * len(plane_tasks),
+                    [preview_diff_floor_fraction] * len(plane_tasks),
+                    [threshold_value] * len(plane_tasks),
                     [crop_z] * len(plane_tasks),
                     [crop_y] * len(plane_tasks),
                     [crop_x] * len(plane_tasks),
@@ -1030,6 +1068,10 @@ def save_timeseries_gifs(
                 diff_colormap,
                 diff_display_min,
                 diff_display_max,
+                preview_diff_mode,
+                preview_diff_noise_floor,
+                preview_diff_floor_fraction,
+                threshold_value,
                 crop_z,
                 crop_y,
                 crop_x,
@@ -1898,31 +1940,6 @@ def main() -> int:
             first_previous_dataset_root,
         )
 
-        if args.gif_only:
-            gif_paths = save_timeseries_gifs(
-                comparisons,
-                dataset_path,
-                output_db,
-                center,
-                requested_planes,
-                args.gif_mode,
-                args.gif_downsample,
-                args.gif_fps,
-                args.gif_labels,
-                args.gif_colormap,
-                args.gif_diff_colormap,
-                args.diff_display_min,
-                args.diff_display_max,
-                args.crop_z,
-                args.crop_y,
-                args.crop_x,
-                args.jobs,
-            )
-            for gif_path in gif_paths:
-                LOGGER.info("GIF written to %s", gif_path)
-            LOGGER.info("GIF export complete. No database or CSV written.")
-            return 0
-
         if args.absolute_threshold is not None:
             baseline_sigma = 0.0
             threshold_value = float(args.absolute_threshold)
@@ -1941,6 +1958,36 @@ def main() -> int:
             threshold_value = baseline_sigma * args.threshold_sigma
             LOGGER.info("Baseline noise sigma: %.6g", baseline_sigma)
             LOGGER.info("Detection threshold: %.6g", threshold_value)
+
+        if args.gif_only:
+            gif_threshold_value = threshold_value if args.preview_diff_mode == "suppressed" else None
+            gif_paths = save_timeseries_gifs(
+                comparisons,
+                dataset_path,
+                output_db,
+                center,
+                requested_planes,
+                args.gif_mode,
+                args.gif_downsample,
+                args.gif_fps,
+                args.gif_labels,
+                args.gif_colormap,
+                args.gif_diff_colormap,
+                args.diff_display_min,
+                args.diff_display_max,
+                args.preview_diff_mode,
+                args.preview_diff_noise_floor,
+                args.preview_diff_floor_fraction,
+                gif_threshold_value,
+                args.crop_z,
+                args.crop_y,
+                args.crop_x,
+                args.jobs,
+            )
+            for gif_path in gif_paths:
+                LOGGER.info("GIF written to %s", gif_path)
+            LOGGER.info("GIF export complete. No database or CSV written.")
+            return 0
 
         if args.preview:
             (
@@ -2055,6 +2102,7 @@ def main() -> int:
             output_csv = export_events_csv(connection, run_id, output_db)
             LOGGER.info("CSV summary written to %s", output_csv)
             if args.save_gifs:
+                gif_threshold_value = threshold_value if args.preview_diff_mode == "suppressed" else None
                 gif_paths = save_timeseries_gifs(
                     comparisons,
                     dataset_path,
@@ -2069,6 +2117,10 @@ def main() -> int:
                     args.gif_diff_colormap,
                     args.diff_display_min,
                     args.diff_display_max,
+                    args.preview_diff_mode,
+                    args.preview_diff_noise_floor,
+                    args.preview_diff_floor_fraction,
+                    gif_threshold_value,
                     args.crop_z,
                     args.crop_y,
                     args.crop_x,
