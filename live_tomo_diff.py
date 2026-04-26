@@ -12,6 +12,7 @@ import h5py
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import Normalize
+from matplotlib.widgets import Slider
 
 
 POLL_INTERVAL = 2.0
@@ -486,6 +487,53 @@ def update_display(
     plt.pause(0.001)
 
 
+def append_history_entry(
+    history: list[dict[str, object]],
+    second_image: np.ndarray,
+    first_image: np.ndarray,
+    second_dataset_root: Path,
+    second_scan: Path,
+) -> None:
+    history.append(
+        {
+            "diff_image": second_image - first_image,
+            "dataset_root": second_dataset_root,
+            "scan_path": second_scan,
+        }
+    )
+
+
+def render_history_entry(
+    history: list[dict[str, object]],
+    history_index: int,
+    image_artist,
+    colorbar,
+    axis,
+    first_dataset_root: Path,
+    display_min: float | None = None,
+    display_max: float | None = None,
+) -> None:
+    entry = history[history_index]
+    update_display(
+        image_artist,
+        colorbar,
+        axis,
+        entry["diff_image"],
+        first_dataset_root,
+        entry["dataset_root"],
+        display_min,
+        display_max,
+    )
+
+
+def sync_history_slider(slider: Slider, history_length: int) -> None:
+    max_index = max(history_length - 1, 0)
+    slider.valmax = max_index
+    slider.ax.set_xlim(slider.valmin, max_index if max_index > slider.valmin else slider.valmin + 1)
+    slider.valtext.set_text(f"{int(round(slider.val)) + 1}/{history_length}")
+    slider.ax.figure.canvas.draw_idle()
+
+
 def main() -> int:
     args = parse_args()
     configure_logging(args.log_level)
@@ -553,25 +601,64 @@ def main() -> int:
         log_exception_summary("Startup failed", exc)
         return 1
 
-    diff_image = second_image - first_image
+    history: list[dict[str, object]] = []
+    append_history_entry(history, second_image, first_image, current_dataset_root, current_scan)
 
     plt.ion()
     fig, ax = plt.subplots(figsize=DEFAULT_FIGSIZE)
-    image_artist = ax.imshow(diff_image, cmap=args.colormap)
+    fig.subplots_adjust(bottom=0.16)
+    image_artist = ax.imshow(history[0]["diff_image"], cmap=args.colormap)
     colorbar = fig.colorbar(image_artist, ax=ax)
     colorbar.set_label("Difference")
     ax.set_xlabel("X")
     ax.set_ylabel("Y")
-    update_display(
+
+    slider_ax = fig.add_axes([0.2, 0.06, 0.6, 0.03])
+    history_slider = Slider(
+        slider_ax,
+        "Rendered diff",
+        0,
+        max(len(history) - 1, 1),
+        valinit=0,
+        valstep=1,
+    )
+    current_history_index = 0
+
+    def refresh_slider_text() -> None:
+        history_slider.valtext.set_text(f"{current_history_index + 1}/{len(history)}")
+
+    def on_slider_change(raw_value: float) -> None:
+        nonlocal current_history_index
+        history_index = int(round(raw_value))
+        if history_index == current_history_index:
+            refresh_slider_text()
+            return
+        current_history_index = history_index
+        render_history_entry(
+            history,
+            current_history_index,
+            image_artist,
+            colorbar,
+            ax,
+            reference_dataset_root,
+            args.display_min,
+            args.display_max,
+        )
+        refresh_slider_text()
+
+    history_slider.on_changed(on_slider_change)
+    sync_history_slider(history_slider, len(history))
+    render_history_entry(
+        history,
+        current_history_index,
         image_artist,
         colorbar,
         ax,
-        diff_image,
         reference_dataset_root,
-        current_dataset_root,
         args.display_min,
         args.display_max,
     )
+    refresh_slider_text()
 
     LOGGER.info("Reference dataset: %s", reference_dataset_root)
     LOGGER.info("Reference projection scan: %s", reference_scan)
@@ -617,17 +704,13 @@ def main() -> int:
                         args.dataset_path,
                         args.downsample,
                     )
-                    diff_image = second_image - first_image
-                    update_display(
-                        image_artist,
-                        colorbar,
-                        ax,
-                        diff_image,
-                        reference_dataset_root,
-                        current_dataset_root,
-                        args.display_min,
-                        args.display_max,
-                    )
+                    was_showing_latest = current_history_index == len(history) - 1
+                    append_history_entry(history, second_image, first_image, current_dataset_root, current_scan)
+                    sync_history_slider(history_slider, len(history))
+                    if was_showing_latest:
+                        history_slider.set_val(len(history) - 1)
+                    else:
+                        refresh_slider_text()
                     LOGGER.info("Updated comparison dataset: %s", current_dataset_root)
                     LOGGER.info("Updated comparison scan: %s", current_scan)
                     LOGGER.info("Comparison projections available: %s", second_count)
