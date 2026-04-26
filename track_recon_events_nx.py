@@ -501,6 +501,38 @@ def list_series_datasets(
     return results
 
 
+def list_series_dataset_roots(reference_dataset_root: Path) -> list[tuple[int, Path]]:
+    collection_dir = reference_dataset_root.parent
+    series_name = dataset_series_name(reference_dataset_root)
+    results: list[tuple[int, Path]] = []
+
+    for dataset_dir in sorted(path for path in collection_dir.iterdir() if is_dataset_directory(path)):
+        if dataset_series_name(dataset_dir) != series_name:
+            continue
+        results.append((dataset_sequence_number(dataset_dir), dataset_dir))
+
+    duplicate_sequences: dict[int, list[Path]] = {}
+    for sequence_number, dataset_dir in results:
+        duplicate_sequences.setdefault(sequence_number, []).append(dataset_dir)
+    ambiguous = {
+        sequence_number: dataset_dirs
+        for sequence_number, dataset_dirs in duplicate_sequences.items()
+        if len(dataset_dirs) > 1
+    }
+    if ambiguous:
+        details = "; ".join(
+            f"#{sequence_number:04d}: {', '.join(str(path) for path in dataset_dirs)}"
+            for sequence_number, dataset_dirs in sorted(ambiguous.items())
+        )
+        raise RuntimeError(
+            "Ambiguous dataset numbering in series. Each comparison step must have a unique "
+            f"4-digit sequence number. Conflicts: {details}"
+        )
+
+    results.sort(key=lambda item: item[0])
+    return results
+
+
 def build_stepwise_comparisons(
     reference_dataset_root: Path,
     start_number: int,
@@ -545,6 +577,72 @@ def build_stepwise_comparisons(
         )
 
     return comparisons
+
+
+def resolve_preview_comparison(
+    reference_dataset_root: Path,
+    start_number: int,
+    stop_number: int,
+    dataset_path: str | None,
+    preview_sequence: int | None,
+) -> tuple[int, Path, Path, int, Path, Path]:
+    low = min(start_number, stop_number)
+    high = max(start_number, stop_number)
+    series_roots = [
+        (sequence_number, dataset_root)
+        for sequence_number, dataset_root in list_series_dataset_roots(reference_dataset_root)
+        if low <= sequence_number <= high
+    ]
+    if not series_roots:
+        raise RuntimeError("No series members found in the requested range")
+
+    if preview_sequence is not None:
+        selected_index = next(
+            (index for index, (sequence_number, _dataset_root) in enumerate(series_roots) if sequence_number == preview_sequence),
+            None,
+        )
+        if selected_index is None:
+            raise RuntimeError(f"No stepwise comparison found for preview sequence #{preview_sequence:04d}")
+        if selected_index == 0:
+            raise RuntimeError(
+                f"Preview sequence #{preview_sequence:04d} has no previous in-range series member for a stepwise comparison"
+            )
+        candidate_indices = [selected_index]
+    else:
+        candidate_indices = list(range(1, len(series_roots)))
+
+    last_error: Exception | None = None
+    for selected_index in candidate_indices:
+        sequence_number, dataset_root = series_roots[selected_index]
+        previous_sequence, previous_dataset_root = series_roots[selected_index - 1]
+        try:
+            recon_file = find_latest_reconstruction_file(dataset_root, dataset_path)
+            previous_recon_file = find_latest_reconstruction_file(previous_dataset_root, dataset_path)
+        except Exception as exc:
+            last_error = exc
+            LOGGER.warning(
+                "Skipping preview candidate #%04d minus #%04d: %s",
+                sequence_number,
+                previous_sequence,
+                exc,
+            )
+            continue
+        return (
+            sequence_number,
+            dataset_root,
+            recon_file,
+            previous_sequence,
+            previous_dataset_root,
+            previous_recon_file,
+        )
+
+    if preview_sequence is not None and last_error is not None:
+        raise RuntimeError(
+            f"Preview sequence #{preview_sequence:04d} could not be resolved to valid reconstruction files: {last_error}"
+        )
+    if last_error is not None:
+        raise RuntimeError(f"No valid preview comparison reconstructions found in the requested range: {last_error}")
+    raise RuntimeError("No stepwise comparison reconstructions found in the requested range")
 
 
 def volume_shape(
@@ -668,18 +766,6 @@ def load_slice_pair(
         ref_slice = np.asarray(ref_volume[full_z_index, y_range[0]:y_range[1], x_range[0]:x_range[1]], dtype=np.float32)
         cmp_slice = np.asarray(cmp_volume[full_z_index, y_range[0]:y_range[1], x_range[0]:x_range[1]], dtype=np.float32)
     return ref_slice, cmp_slice
-
-
-def choose_preview_comparison(
-    comparisons: list[tuple[int, Path, Path, int, Path, Path]],
-    preview_sequence: int | None,
-) -> tuple[int, Path, Path, int, Path, Path]:
-    if preview_sequence is None:
-        return comparisons[0]
-    for comparison in comparisons:
-        if comparison[0] == preview_sequence:
-            return comparison
-    raise RuntimeError(f"No stepwise comparison found for preview sequence #{preview_sequence:04d}")
 
 
 def choose_preview_z(
@@ -1906,24 +1992,6 @@ def main() -> int:
             args.crop_y,
             args.crop_x,
         )
-        comparisons = build_stepwise_comparisons(
-            reference_dataset_root,
-            args.start_number,
-            args.stop_number,
-            dataset_path,
-        )
-        if not comparisons:
-            raise RuntimeError("No stepwise comparison reconstructions found in the requested range")
-
-        LOGGER.info("Series anchor dataset: %s", reference_dataset_root)
-        LOGGER.info("Series anchor reconstruction: %s", reference_recon_file)
-        LOGGER.info("Dataset path: %s", dataset_path)
-        LOGGER.info("Event detection workers: %d", args.jobs)
-        LOGGER.info(
-            "Processing sequence order: %s",
-            ", ".join(f"#{sequence_number:04d}" for sequence_number, *_rest in comparisons),
-        )
-
         if args.preview:
             (
                 preview_sequence,
@@ -1932,7 +2000,17 @@ def main() -> int:
                 preview_previous_sequence,
                 preview_previous_dataset_root,
                 preview_previous_recon_file,
-            ) = choose_preview_comparison(comparisons, args.preview_sequence)
+            ) = resolve_preview_comparison(
+                reference_dataset_root,
+                args.start_number,
+                args.stop_number,
+                dataset_path,
+                args.preview_sequence,
+            )
+            LOGGER.info("Series anchor dataset: %s", reference_dataset_root)
+            LOGGER.info("Series anchor reconstruction: %s", reference_recon_file)
+            LOGGER.info("Dataset path: %s", dataset_path)
+            LOGGER.info("Event detection workers: %d", args.jobs)
             LOGGER.info(
                 "Preview comparison selected: #%04d %s minus #%04d %s",
                 preview_sequence,
@@ -1994,6 +2072,24 @@ def main() -> int:
             )
             LOGGER.info("Preview complete. No database or CSV written.")
             return 0
+
+        comparisons = build_stepwise_comparisons(
+            reference_dataset_root,
+            args.start_number,
+            args.stop_number,
+            dataset_path,
+        )
+        if not comparisons:
+            raise RuntimeError("No stepwise comparison reconstructions found in the requested range")
+
+        LOGGER.info("Series anchor dataset: %s", reference_dataset_root)
+        LOGGER.info("Series anchor reconstruction: %s", reference_recon_file)
+        LOGGER.info("Dataset path: %s", dataset_path)
+        LOGGER.info("Event detection workers: %d", args.jobs)
+        LOGGER.info(
+            "Processing sequence order: %s",
+            ", ".join(f"#{sequence_number:04d}" for sequence_number, *_rest in comparisons),
+        )
 
         first_sequence, first_dataset_root, first_recon_file, first_previous_sequence, first_previous_dataset_root, first_previous_recon_file = comparisons[0]
         LOGGER.info(
