@@ -32,6 +32,7 @@ DEFAULT_TARGET_SAMPLE_COUNT = 1_000_000
 DEFAULT_THRESHOLD_SIGMA = 5.0
 DEFAULT_MAX_EVENTS = 100
 DEFAULT_MIN_EVENT_SIZE = 1000
+DEFAULT_MIN_SLICE_COMPONENT_SIZE = 4
 DEFAULT_MERGE_GAP = 10
 DEFAULT_GIF_FPS = 2
 
@@ -136,6 +137,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=DEFAULT_MIN_EVENT_SIZE,
         help="Minimum voxel count for an event to be recorded. Default: 1000",
+    )
+    parser.add_argument(
+        "--min-slice-component-size",
+        type=int,
+        default=DEFAULT_MIN_SLICE_COMPONENT_SIZE,
+        help="Minimum 2D connected-component size to keep on each slice before 3D event merging. Default: 4",
     )
     parser.add_argument(
         "--merge-gap",
@@ -1017,7 +1024,12 @@ def benchmark_preview_io(
         crop_x=args.crop_x,
     ):
         slice_component_start = perf_counter()
-        slice_result = process_diff_slice_components(z_index, diff_window_slice, threshold_value)
+        slice_result = process_diff_slice_components(
+            z_index,
+            diff_window_slice,
+            threshold_value,
+            args.min_slice_component_size,
+        )
         preview_slice_results.append(slice_result)
         _slice_z, slice_components, slice_max_abs_diff = slice_result
         LOGGER.info(
@@ -1137,7 +1149,12 @@ def show_detection_preview(
     )
     event_stack_start = perf_counter()
     preview_slice_results = [
-        process_diff_slice_components(z_index, diff_window_slice, threshold_value)
+        process_diff_slice_components(
+            z_index,
+            diff_window_slice,
+            threshold_value,
+            args.min_slice_component_size,
+        )
         for z_index, diff_window_slice in iter_diff_slices(
             reference_file,
             comparison_file,
@@ -1595,11 +1612,17 @@ def process_diff_slice_components(
     z_index: int,
     diff_slice: np.ndarray,
     threshold_value: float,
+    min_slice_component_size: int = 1,
 ) -> tuple[int, list[SliceComponent], float]:
     abs_slice = np.abs(diff_slice)
     max_abs_diff = float(np.max(abs_slice))
     mask = abs_slice >= threshold_value
     components = find_slice_components(mask, diff_slice, z_index)
+    if min_slice_component_size > 1:
+        components = [
+            component for component in components
+            if component.voxel_count >= min_slice_component_size
+        ]
     return z_index, components, max_abs_diff
 
 
@@ -1617,12 +1640,18 @@ def process_diff_chunk_components(
     dataset_path: str,
     z_indices: list[int],
     threshold_value: float,
+    min_slice_component_size: int,
     crop_z: str | None,
     crop_y: str | None,
     crop_x: str | None,
 ) -> list[tuple[int, list[SliceComponent], float]]:
     return [
-        process_diff_slice_components(z_index, diff_slice, threshold_value)
+        process_diff_slice_components(
+            z_index,
+            diff_slice,
+            threshold_value,
+            min_slice_component_size,
+        )
         for z_index, diff_slice in iter_diff_slices(
             reference_file,
             comparison_file,
@@ -1764,6 +1793,7 @@ def detect_events_for_comparison(
     dataset_path: str,
     threshold_value: float,
     min_event_size: int,
+    min_slice_component_size: int,
     merge_gap: int,
     jobs: int = 1,
     crop_z: str | None = None,
@@ -1774,7 +1804,12 @@ def detect_events_for_comparison(
 
     if jobs <= 1:
         slice_results = [
-            process_diff_slice_components(z_index, diff_slice, threshold_value)
+            process_diff_slice_components(
+                z_index,
+                diff_slice,
+                threshold_value,
+                min_slice_component_size,
+            )
             for z_index, diff_slice in iter_diff_slices(
                 reference_file,
                 comparison_file,
@@ -1797,6 +1832,7 @@ def detect_events_for_comparison(
                     [dataset_path] * len(z_chunks),
                     z_chunks,
                     [threshold_value] * len(z_chunks),
+                    [min_slice_component_size] * len(z_chunks),
                     [crop_z] * len(z_chunks),
                     [crop_y] * len(z_chunks),
                     [crop_x] * len(z_chunks),
@@ -1811,6 +1847,7 @@ def process_comparison_task(
     dataset_path: str,
     threshold_value: float,
     min_event_size: int,
+    min_slice_component_size: int,
     merge_gap: int,
     jobs: int,
     crop_z: str | None,
@@ -1824,6 +1861,7 @@ def process_comparison_task(
         dataset_path,
         threshold_value,
         min_event_size,
+        min_slice_component_size,
         merge_gap,
         jobs,
         crop_z,
@@ -1862,6 +1900,7 @@ def initialize_database(db_path: Path) -> sqlite3.Connection:
             threshold_sigma REAL NOT NULL,
             threshold_value REAL NOT NULL,
             min_event_size INTEGER NOT NULL,
+            min_slice_component_size INTEGER NOT NULL DEFAULT 4,
             merge_gap INTEGER NOT NULL,
             crop_z_start INTEGER NOT NULL DEFAULT 0,
             crop_y_start INTEGER NOT NULL DEFAULT 0,
@@ -1934,6 +1973,10 @@ def initialize_database(db_path: Path) -> sqlite3.Connection:
     }
     if "merge_gap" not in run_columns:
         connection.execute(f"ALTER TABLE runs ADD COLUMN merge_gap INTEGER NOT NULL DEFAULT {DEFAULT_MERGE_GAP}")
+    if "min_slice_component_size" not in run_columns:
+        connection.execute(
+            f"ALTER TABLE runs ADD COLUMN min_slice_component_size INTEGER NOT NULL DEFAULT {DEFAULT_MIN_SLICE_COMPONENT_SIZE}"
+        )
     if "crop_z_start" not in run_columns:
         connection.execute("ALTER TABLE runs ADD COLUMN crop_z_start INTEGER NOT NULL DEFAULT 0")
     if "crop_y_start" not in run_columns:
@@ -1995,12 +2038,13 @@ def insert_run(
             threshold_sigma,
             threshold_value,
             min_event_size,
+            min_slice_component_size,
             merge_gap,
             crop_z_start,
             crop_y_start,
             crop_x_start,
             max_events
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(reference_path),
@@ -2013,6 +2057,7 @@ def insert_run(
             args.threshold_sigma,
             threshold_value,
             args.min_event_size,
+            args.min_slice_component_size,
             args.merge_gap,
             crop_z_start,
             crop_y_start,
@@ -2242,6 +2287,9 @@ def main() -> int:
         return 1
     if args.min_event_size <= 0:
         LOGGER.error("--min-event-size must be > 0")
+        return 1
+    if args.min_slice_component_size <= 0:
+        LOGGER.error("--min-slice-component-size must be > 0")
         return 1
     if args.merge_gap < 0:
         LOGGER.error("--merge-gap must be >= 0")
@@ -2512,6 +2560,7 @@ def main() -> int:
                     dataset_path,
                     threshold_value,
                     args.min_event_size,
+                    args.min_slice_component_size,
                     args.merge_gap,
                     args.jobs,
                     args.crop_z,
