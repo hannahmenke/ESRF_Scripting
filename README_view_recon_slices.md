@@ -1,82 +1,89 @@
 # `view_recon_slices.py`
 
-## What it is
+## Overview
 
-This script opens a reconstructed 3D volume from an HDF5 file and displays a few slices.
+`view_recon_slices.py` opens one reconstructed 3D HDF5 volume and displays either:
 
-## What it does
+- several slices along one axis
+- one orthogonal `XY/XZ/YZ` triplet
 
-When started, the script:
+It is intended as a lightweight inspection tool for a single reconstruction file.
 
-1. opens a reconstruction `.h5` file
-2. finds a likely 3D dataset automatically, or uses `--dataset-path`
-3. extracts slices along the chosen axis, or shows an orthogonal XY/XZ/YZ triplet
-4. displays the result in a matplotlib figure
+## Processing Model
 
-## How to run
+The script:
 
-Interactive:
+1. opens one reconstruction HDF5 file
+2. resolves the internal 3D dataset automatically unless `--dataset-path` is provided
+3. extracts either axis-aligned slices or one orthogonal slice triplet
+4. displays the result in a Matplotlib figure
+
+## Common Workflows
+
+### Interactive prompt mode
 
 ```bash
 python3 view_recon_slices.py
 ```
 
-Direct path:
+### Open one reconstruction directly
 
 ```bash
 python3 view_recon_slices.py /path/to/reconstruction.h5
 ```
 
-Full explicit example:
+### Show evenly spaced slices
 
 ```bash
 python3 view_recon_slices.py /path/to/reconstruction.h5 \
-  --dataset-path /entry/data/data \
+  --axis 0 \
+  --num-slices 4
+```
+
+### Show explicit slices
+
+```bash
+python3 view_recon_slices.py /path/to/reconstruction.h5 \
   --axis 1 \
   --slices 100,300,500
 ```
 
-Choose axis and evenly spaced slices:
-
-```bash
-python3 view_recon_slices.py /path/to/reconstruction.h5 --axis 0 --num-slices 4
-```
-
-Choose exact slices:
-
-```bash
-python3 view_recon_slices.py /path/to/reconstruction.h5 --slices 100,300,500
-```
-
-Show orthogonal slices through the volume center:
+### Show one orthogonal triplet through the volume center
 
 ```bash
 python3 view_recon_slices.py /path/to/reconstruction.h5 --orthogonal
 ```
 
-Show orthogonal slices through a chosen point:
+### Show one orthogonal triplet through a chosen point
 
 ```bash
 python3 view_recon_slices.py /path/to/reconstruction.h5 \
   --orthogonal-center 500,1000,1000
 ```
 
-Specify the exact internal dataset:
+### Use an explicit internal dataset path
 
 ```bash
-python3 view_recon_slices.py /path/to/reconstruction.h5 --dataset-path /entry/data/data
+python3 view_recon_slices.py /path/to/reconstruction.h5 \
+  --dataset-path /entry/data/data
 ```
 
-## Options
+## Key Options
 
-- `--axis 0|1|2`: axis along which to slice
-- `--num-slices N`: number of evenly spaced slices to display
-- `--slices a,b,c`: explicit slice indices
-- `--orthogonal`: show one XY/XZ/YZ triplet through the volume center
-- `--orthogonal-center a,b,c`: center indices for orthogonal views as axis0,axis1,axis2
-- `--dataset-path PATH`: exact HDF5 dataset path
-- `--colormap NAME`: matplotlib colormap, default `gray`
-- `--log-level DEBUG`: enable full stack traces for file or dataset-resolution failures
+- `--dataset-path`
+  - explicit HDF5 dataset path
+- `--axis 0|1|2`
+  - axis along which slices are extracted
+- `--num-slices`
+  - number of evenly spaced slices
+- `--slices`
+  - explicit comma-separated slice indices
+- `--orthogonal`
+  - show one `XY/XZ/YZ` triplet instead of axis-aligned slices
+- `--orthogonal-center z,y,x`
+  - explicit orthogonal center
+- `--colormap`
+  - Matplotlib colormap, default `gray`
 
 ## Dependencies
 
@@ -84,3 +91,9 @@ python3 view_recon_slices.py /path/to/reconstruction.h5 --dataset-path /entry/da
 - `numpy`
 - `h5py`
 - `matplotlib`
+
+## Notes
+
+- Slice indices are zero-based.
+- If `--dataset-path` is not supplied, the script searches the file for a suitable 3D numeric dataset.
+- `--log-level DEBUG` enables full stack traces for file and dataset-resolution failures.
