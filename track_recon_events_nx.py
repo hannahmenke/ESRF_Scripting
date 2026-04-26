@@ -1916,14 +1916,6 @@ def main() -> int:
             raise RuntimeError("No stepwise comparison reconstructions found in the requested range")
 
         first_sequence, first_dataset_root, first_recon_file, first_previous_sequence, first_previous_dataset_root, first_previous_recon_file = comparisons[0]
-        center = parse_orthogonal_center(
-            args.orthogonal_center,
-            volume_shape(first_recon_file, dataset_path, args.crop_z, args.crop_y, args.crop_x),
-        )
-        requested_planes = [part.strip().lower() for part in args.gif_planes.split(",") if part.strip()]
-        valid_planes = {"xy", "xz", "yz"}
-        if any(plane not in valid_planes for plane in requested_planes):
-            raise RuntimeError(f"--gif-planes must contain only {sorted(valid_planes)}")
         LOGGER.info("Series anchor dataset: %s", reference_dataset_root)
         LOGGER.info("Series anchor reconstruction: %s", reference_recon_file)
         LOGGER.info("Dataset path: %s", dataset_path)
@@ -1939,6 +1931,79 @@ def main() -> int:
             first_previous_sequence,
             first_previous_dataset_root,
         )
+
+        if args.preview:
+            (
+                preview_sequence,
+                preview_dataset_root,
+                preview_recon_file,
+                preview_previous_sequence,
+                preview_previous_dataset_root,
+                preview_previous_recon_file,
+            ) = choose_preview_comparison(comparisons, args.preview_sequence)
+            if args.absolute_threshold is not None:
+                baseline_sigma = 0.0
+                threshold_value = float(args.absolute_threshold)
+                LOGGER.info("Baseline noise sigma: skipped because --absolute-threshold was provided")
+                LOGGER.info("Detection threshold: %.6g (absolute override)", threshold_value)
+            else:
+                baseline_sigma = estimate_baseline_sigma(
+                    preview_previous_recon_file,
+                    preview_recon_file,
+                    dataset_path,
+                    args.noise_target_samples,
+                    args.crop_z,
+                    args.crop_y,
+                    args.crop_x,
+                )
+                threshold_value = baseline_sigma * args.threshold_sigma
+                LOGGER.info(
+                    "Preview baseline noise sigma from #%04d minus #%04d: %.6g",
+                    preview_sequence,
+                    preview_previous_sequence,
+                    baseline_sigma,
+                )
+                LOGGER.info("Detection threshold: %.6g", threshold_value)
+            preview_z = choose_preview_z(
+                preview_previous_recon_file,
+                preview_recon_file,
+                dataset_path,
+                args.preview_z,
+                args.crop_z,
+                args.crop_y,
+                args.crop_x,
+            )
+            LOGGER.info(
+                "Showing preview for stepwise comparison #%04d %s minus #%04d %s at z=%s",
+                preview_sequence,
+                preview_dataset_root,
+                preview_previous_sequence,
+                preview_previous_dataset_root,
+                preview_z,
+            )
+            show_detection_preview(
+                preview_previous_recon_file,
+                preview_recon_file,
+                dataset_path,
+                threshold_value,
+                args.min_event_size,
+                args.merge_gap,
+                preview_z,
+                preview_sequence,
+                preview_previous_sequence,
+                args,
+            )
+            LOGGER.info("Preview complete. No database or CSV written.")
+            return 0
+
+        center = parse_orthogonal_center(
+            args.orthogonal_center,
+            volume_shape(first_recon_file, dataset_path, args.crop_z, args.crop_y, args.crop_x),
+        )
+        requested_planes = [part.strip().lower() for part in args.gif_planes.split(",") if part.strip()]
+        valid_planes = {"xy", "xz", "yz"}
+        if any(plane not in valid_planes for plane in requested_planes):
+            raise RuntimeError(f"--gif-planes must contain only {sorted(valid_planes)}")
 
         if args.absolute_threshold is not None:
             baseline_sigma = 0.0
@@ -1987,47 +2052,6 @@ def main() -> int:
             for gif_path in gif_paths:
                 LOGGER.info("GIF written to %s", gif_path)
             LOGGER.info("GIF export complete. No database or CSV written.")
-            return 0
-
-        if args.preview:
-            (
-                preview_sequence,
-                preview_dataset_root,
-                preview_recon_file,
-                preview_previous_sequence,
-                preview_previous_dataset_root,
-                preview_previous_recon_file,
-            ) = choose_preview_comparison(comparisons, args.preview_sequence)
-            preview_z = choose_preview_z(
-                preview_previous_recon_file,
-                preview_recon_file,
-                dataset_path,
-                args.preview_z,
-                args.crop_z,
-                args.crop_y,
-                args.crop_x,
-            )
-            LOGGER.info(
-                "Showing preview for stepwise comparison #%04d %s minus #%04d %s at z=%s",
-                preview_sequence,
-                preview_dataset_root,
-                preview_previous_sequence,
-                preview_previous_dataset_root,
-                preview_z,
-            )
-            show_detection_preview(
-                preview_previous_recon_file,
-                preview_recon_file,
-                dataset_path,
-                threshold_value,
-                args.min_event_size,
-                args.merge_gap,
-                preview_z,
-                preview_sequence,
-                preview_previous_sequence,
-                args,
-            )
-            LOGGER.info("Preview complete. No database or CSV written.")
             return 0
 
         connection = initialize_database(output_db)
