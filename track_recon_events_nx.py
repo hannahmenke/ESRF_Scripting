@@ -1614,25 +1614,95 @@ def save_raw_screening_gifs(
     crop_x: str | None,
     jobs: int,
 ) -> list[Path]:
-    frame_sets: dict[str, list[np.ndarray]] = {}
-    output_paths: list[Path] = []
     total_datasets = len(datasets)
+    output_paths = [output_db.with_name(f"{output_db.stem}_{plane}_raw.gif") for plane in planes]
+    frame_duration = 1.0 / max(fps, 1)
+    writers: dict[str, Any] = {}
+    sequence_order = [dataset_entry[0] for dataset_entry in datasets]
+    sequence_to_position = {sequence_number: index for index, sequence_number in enumerate(sequence_order)}
+    next_position_to_write = 0
+    pending_results: dict[int, dict[str, np.ndarray]] = {}
 
-    if jobs > 1 and len(datasets) > 1:
-        max_workers = min(jobs, len(datasets), os.cpu_count() or jobs)
-        LOGGER.info("Running raw GIF screening frame generation in parallel with %d workers", max_workers)
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            future_to_sequence = {}
+    LOGGER.info("Opening %d raw screening GIF writer(s)", len(output_paths))
+    try:
+        for plane, output_path in zip(planes, output_paths):
+            LOGGER.info("Preparing GIF writer for %s", output_path.name)
+            writers[plane] = imageio.get_writer(output_path, mode="I", duration=frame_duration)
+
+        def flush_ready_frames() -> None:
+            nonlocal next_position_to_write
+            while next_position_to_write < total_datasets:
+                sequence_number = sequence_order[next_position_to_write]
+                frames = pending_results.get(sequence_number)
+                if frames is None:
+                    break
+                for plane in planes:
+                    writers[plane].append_data(frames[f"{plane}_raw"])
+                del pending_results[sequence_number]
+                next_position_to_write += 1
+                LOGGER.info(
+                    "Appended raw GIF frame %d/%d for scan #%04d",
+                    next_position_to_write,
+                    total_datasets,
+                    sequence_number,
+                )
+
+        if jobs > 1 and len(datasets) > 1:
+            max_workers = min(jobs, len(datasets), os.cpu_count() or jobs)
+            LOGGER.info("Running raw GIF screening frame generation in parallel with %d workers", max_workers)
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                future_to_sequence = {}
+                for index, dataset_entry in enumerate(datasets, start=1):
+                    sequence_number = dataset_entry[0]
+                    LOGGER.info(
+                        "Queueing raw GIF frame %d/%d for scan #%04d",
+                        index,
+                        total_datasets,
+                        sequence_number,
+                    )
+                    future = executor.submit(
+                        build_raw_gif_frames_for_dataset,
+                        dataset_entry,
+                        dataset_path,
+                        center,
+                        planes,
+                        downsample,
+                        labels,
+                        raw_colormap,
+                        crop_z,
+                        crop_y,
+                        crop_x,
+                    )
+                    future_to_sequence[future] = sequence_number
+                completed = 0
+                for future in as_completed(future_to_sequence):
+                    sequence_number = future_to_sequence[future]
+                    completed += 1
+                    LOGGER.info(
+                        "Completed raw GIF frame render %d/%d for scan #%04d",
+                        completed,
+                        total_datasets,
+                        sequence_number,
+                    )
+                    _result_sequence, frames = future.result()
+                    pending_results[sequence_number] = frames
+                    LOGGER.info(
+                        "Buffered rendered frame for scan #%04d at output position %d/%d",
+                        sequence_number,
+                        sequence_to_position[sequence_number] + 1,
+                        total_datasets,
+                    )
+                    flush_ready_frames()
+        else:
             for index, dataset_entry in enumerate(datasets, start=1):
                 sequence_number = dataset_entry[0]
                 LOGGER.info(
-                    "Queueing raw GIF frame %d/%d for scan #%04d",
+                    "Rendering raw GIF frame %d/%d for scan #%04d",
                     index,
                     total_datasets,
                     sequence_number,
                 )
-                future = executor.submit(
-                    build_raw_gif_frames_for_dataset,
+                _result_sequence, frames = build_raw_gif_frames_for_dataset(
                     dataset_entry,
                     dataset_path,
                     center,
@@ -1644,72 +1714,19 @@ def save_raw_screening_gifs(
                     crop_y,
                     crop_x,
                 )
-                future_to_sequence[future] = sequence_number
-            task_results = []
-            completed = 0
-            for future in as_completed(future_to_sequence):
-                sequence_number = future_to_sequence[future]
-                completed += 1
-                LOGGER.info(
-                    "Completed raw GIF frame %d/%d for scan #%04d",
-                    completed,
-                    total_datasets,
-                    sequence_number,
-                )
-                task_results.append(future.result())
-    else:
-        task_results = []
-        for index, dataset_entry in enumerate(datasets, start=1):
-            sequence_number = dataset_entry[0]
-            LOGGER.info(
-                "Rendering raw GIF frame %d/%d for scan #%04d",
-                index,
-                total_datasets,
-                sequence_number,
-            )
-            task_results.append(
-                build_raw_gif_frames_for_dataset(
-                dataset_entry,
-                dataset_path,
-                center,
-                planes,
-                downsample,
-                labels,
-                raw_colormap,
-                crop_z,
-                crop_y,
-                crop_x,
-            )
-            )
+                pending_results[sequence_number] = frames
+                flush_ready_frames()
 
-    task_results.sort(key=lambda item: item[0])
-    LOGGER.info("All raw scan frames rendered. Assembling GIF frame sets for %d scans", total_datasets)
-    for _sequence_number, frames in task_results:
-        for key, frame in frames.items():
-            frame_sets.setdefault(key, []).append(frame)
+        if next_position_to_write != total_datasets:
+            remaining = sorted(sequence_number for sequence_number in pending_results)
+            raise RuntimeError(f"Failed to flush all raw GIF frames in order; remaining scans: {remaining}")
 
-    gif_tasks = [
-        (output_db.with_name(f"{output_db.stem}_{key}.gif"), frames)
-        for key, frames in frame_sets.items()
-    ]
-    LOGGER.info("Prepared %d raw screening GIF file(s) for writing", len(gif_tasks))
-    if jobs > 1 and len(gif_tasks) > 1:
-        max_workers = min(jobs, len(gif_tasks), os.cpu_count() or jobs)
-        LOGGER.info("Writing raw GIF screening files in parallel with %d workers", max_workers)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            output_paths = list(
-                executor.map(
-                    write_gif_file_with_logging,
-                    (output_path for output_path, _frames in gif_tasks),
-                    (frames for _output_path, frames in gif_tasks),
-                    [fps] * len(gif_tasks),
-                    range(1, len(gif_tasks) + 1),
-                    [len(gif_tasks)] * len(gif_tasks),
-                )
-            )
-    else:
-        for index, (output_path, frames) in enumerate(gif_tasks, start=1):
-            output_paths.append(write_gif_file_with_logging(output_path, frames, fps, index, len(gif_tasks)))
+        LOGGER.info("All raw screening frames appended. Finalizing %d GIF file(s)", len(output_paths))
+    finally:
+        for plane, writer in writers.items():
+            writer.close()
+            LOGGER.info("Closed GIF writer for %s", plane)
+
     return output_paths
 
 
