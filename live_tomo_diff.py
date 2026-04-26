@@ -258,12 +258,14 @@ def load_projection_radiogram(
 
 def resolve_dataset_root(path: Path) -> Path:
     resolved = path.expanduser().resolve()
+    candidates = (resolved, *resolved.parents) if resolved.is_dir() else resolved.parents
+
+    for candidate in candidates:
+        if is_dataset_directory(candidate):
+            return candidate
+
     if resolved.is_dir():
         return resolved
-
-    if resolved.parent.name.startswith("scan"):
-        return resolved.parent.parent
-
     return resolved.parent
 
 
