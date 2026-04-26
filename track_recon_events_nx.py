@@ -1649,8 +1649,11 @@ def save_raw_screening_gifs(
 
         if jobs > 1 and len(datasets) > 1:
             max_workers = min(jobs, len(datasets), os.cpu_count() or jobs)
-            LOGGER.info("Running raw GIF screening frame generation in parallel with %d workers", max_workers)
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            LOGGER.info(
+                "Running raw GIF screening frame generation with %d thread workers to avoid process transfer overhead",
+                max_workers,
+            )
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_sequence = {}
                 for index, dataset_entry in enumerate(datasets, start=1):
                     sequence_number = dataset_entry[0]
