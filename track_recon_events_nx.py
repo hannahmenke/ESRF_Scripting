@@ -949,6 +949,96 @@ def benchmark_preview_io(
     )
     LOGGER.info("Preview-z selection: %.3fs (z=%d)", perf_counter() - preview_z_start, auto_preview_z)
 
+    threshold_value = baseline_sigma * args.threshold_sigma
+    preview_window_radius = 2
+    z_start = max(0, auto_preview_z - preview_window_radius)
+    z_stop = min(cropped_shape[0], auto_preview_z + preview_window_radius + 1)
+    preview_z_indices = list(range(z_start, z_stop))
+
+    event_stack_start = perf_counter()
+    preview_slice_results = [
+        process_diff_slice_components(z_index, diff_window_slice, threshold_value)
+        for z_index, diff_window_slice in iter_diff_slices(
+            reference_file,
+            comparison_file,
+            dataset_path,
+            z_indices=preview_z_indices,
+            crop_z=args.crop_z,
+            crop_y=args.crop_y,
+            crop_x=args.crop_x,
+        )
+    ]
+    merged_events, _preview_max_abs_diff = assemble_events_from_slice_results(
+        preview_slice_results,
+        args.min_event_size,
+        args.merge_gap,
+    )
+    display_events = [
+        event for event in merged_events if event.z_min <= auto_preview_z <= event.z_max
+    ]
+    LOGGER.info(
+        "Local preview event stack assembly: %.3fs (%d slices, %d merged events, %d on shown slice)",
+        perf_counter() - event_stack_start,
+        len(preview_z_indices),
+        len(merged_events),
+        len(display_events),
+    )
+
+    figure_start = perf_counter()
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = np.atleast_1d(axes).ravel()
+    diff_slice = current_slice - previous_slice
+    mask = np.abs(diff_slice) >= threshold_value
+
+    previous_artist = axes[0].imshow(previous_slice, cmap=args.preview_colormap)
+    axes[0].set_title("Previous benchmark")
+    fig.colorbar(previous_artist, ax=axes[0], fraction=0.046, pad=0.04)
+
+    current_artist = axes[1].imshow(current_slice, cmap=args.preview_colormap)
+    axes[1].set_title("Current benchmark")
+    fig.colorbar(current_artist, ax=axes[1], fraction=0.046, pad=0.04)
+
+    diff_display_image = diff_slice
+    if args.preview_diff_mode == "suppressed":
+        noise_floor = (
+            float(args.preview_diff_noise_floor)
+            if args.preview_diff_noise_floor is not None
+            else float(args.preview_diff_floor_fraction) * float(threshold_value)
+        )
+        diff_display_image = suppress_low_differences_for_preview(diff_slice, noise_floor)
+    diff_artist = axes[2].imshow(
+        diff_display_image,
+        cmap=args.preview_diff_colormap,
+        vmin=args.diff_display_min,
+        vmax=args.diff_display_max,
+    )
+    axes[2].set_title(f"Benchmark difference @ z={auto_preview_z}")
+    fig.colorbar(diff_artist, ax=axes[2], fraction=0.046, pad=0.04)
+
+    axes[3].imshow(previous_slice, cmap=args.preview_colormap, alpha=0.35)
+    mask_overlay = np.ma.masked_where(~mask, mask.astype(np.float32))
+    mask_artist = axes[3].imshow(mask_overlay, cmap="autumn", alpha=0.7, vmin=0.0, vmax=1.0)
+    axes[3].set_title(f"Benchmark mask ({len(display_events)} events on shown slice)")
+    fig.colorbar(mask_artist, ax=axes[3], fraction=0.046, pad=0.04)
+    for event in display_events:
+        rectangle = plt.Rectangle(
+            (event.x_min, event.y_min),
+            event.x_max - event.x_min + 1,
+            event.y_max - event.y_min + 1,
+            fill=False,
+            edgecolor="red",
+            linewidth=1.5,
+        )
+        axes[3].add_patch(rectangle)
+
+    plt.tight_layout()
+    LOGGER.info("Matplotlib figure assembly: %.3fs", perf_counter() - figure_start)
+
+    draw_start = perf_counter()
+    fig.canvas.draw()
+    LOGGER.info("Matplotlib canvas draw: %.3fs", perf_counter() - draw_start)
+    plt.close(fig)
+
 
 def show_detection_preview(
     reference_file: Path,
