@@ -831,6 +831,8 @@ def show_detection_preview(
     args: argparse.Namespace,
 ) -> None:
     preview_window_radius = 2
+    LOGGER.info("Preview render substage: loading center slice pair")
+    load_start = perf_counter()
     reference_slice, comparison_slice = load_slice_pair(
         reference_file,
         comparison_file,
@@ -840,32 +842,67 @@ def show_detection_preview(
         args.crop_y,
         args.crop_x,
     )
+    LOGGER.info("Preview render substage complete: loaded center slice pair in %.1fs", perf_counter() - load_start)
     diff_slice = comparison_slice - reference_slice
     mask = np.abs(diff_slice) >= threshold_value
     shape = volume_shape(reference_file, dataset_path, args.crop_z, args.crop_y, args.crop_x)
     z_start = max(0, preview_z - preview_window_radius)
     z_stop = min(shape[0], preview_z + preview_window_radius + 1)
-    preview_slice_results = [
-        process_diff_slice_components(z_index, diff_window_slice, threshold_value)
-        for z_index, diff_window_slice in iter_diff_slices(
-            reference_file,
-            comparison_file,
-            dataset_path,
-            z_indices=list(range(z_start, z_stop)),
-            crop_z=args.crop_z,
-            crop_y=args.crop_y,
-            crop_x=args.crop_x,
-        )
-    ]
+    preview_z_indices = list(range(z_start, z_stop))
+    LOGGER.info(
+        "Preview render substage: assembling local %d-slice event stack%s",
+        len(preview_z_indices),
+        f" with {min(args.jobs, len(preview_z_indices), os.cpu_count() or args.jobs)} workers"
+        if args.jobs > 1 and len(preview_z_indices) > 1
+        else "",
+    )
+    event_stack_start = perf_counter()
+    if args.jobs > 1 and len(preview_z_indices) > 1:
+        preview_chunks = split_indices(preview_z_indices, args.jobs)
+        max_workers = min(args.jobs, len(preview_chunks), os.cpu_count() or args.jobs)
+        preview_slice_results = []
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [
+                executor.submit(
+                    process_diff_chunk_components,
+                    reference_file,
+                    comparison_file,
+                    dataset_path,
+                    chunk,
+                    threshold_value,
+                    args.crop_z,
+                    args.crop_y,
+                    args.crop_x,
+                )
+                for chunk in preview_chunks
+            ]
+            for future in futures:
+                preview_slice_results.extend(future.result())
+    else:
+        preview_slice_results = [
+            process_diff_slice_components(z_index, diff_window_slice, threshold_value)
+            for z_index, diff_window_slice in iter_diff_slices(
+                reference_file,
+                comparison_file,
+                dataset_path,
+                z_indices=preview_z_indices,
+                crop_z=args.crop_z,
+                crop_y=args.crop_y,
+                crop_x=args.crop_x,
+            )
+        ]
     merged_events, _preview_max_abs_diff = assemble_events_from_slice_results(
         preview_slice_results,
         min_event_size,
         merge_gap,
     )
+    LOGGER.info("Preview render substage complete: local event stack assembled in %.1fs", perf_counter() - event_stack_start)
     display_events = [
         event for event in merged_events if event.z_min <= preview_z <= event.z_max
     ]
 
+    LOGGER.info("Preview render substage: building matplotlib figure")
+    figure_start = perf_counter()
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     axes = np.atleast_1d(axes).ravel()
 
@@ -923,6 +960,8 @@ def show_detection_preview(
         f"showing z={preview_z} with local stack {z_start}:{z_stop}"
     )
     plt.tight_layout()
+    LOGGER.info("Preview render substage complete: figure built in %.1fs", perf_counter() - figure_start)
+    LOGGER.info("Preview render substage: handing figure to matplotlib viewer")
     plt.show()
 
 
