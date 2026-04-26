@@ -271,16 +271,24 @@ def resolve_dataset_root(path: Path) -> Path:
 
 def read_image_key(scan_file: Path) -> int | None:
     with h5py.File(scan_file, "r") as h5_file:
-        for candidate in (
-            "entry_0000/instrument/pcobi10lid19det1/header/image_key",
-            "entry/instrument/detector/header/image_key",
-        ):
-            if candidate in h5_file:
-                value = decode_scalar(h5_file[candidate][()])
-                try:
-                    return int(value)
-                except (TypeError, ValueError):
-                    return None
+        candidates: list[str] = []
+
+        def visitor(name: str, obj: h5py.Dataset | h5py.Group) -> None:
+            if not isinstance(obj, h5py.Dataset):
+                return
+            if name.endswith("/header/image_key") or name == "image_key":
+                candidates.append(name)
+
+        h5_file.visititems(visitor)
+
+        for candidate in sorted(candidates):
+            value = decode_scalar(h5_file[candidate][()])
+            try:
+                if isinstance(value, np.ndarray):
+                    return int(np.asarray(value).reshape(-1)[0])
+                return int(value)
+            except (IndexError, TypeError, ValueError):
+                continue
     return None
 
 
