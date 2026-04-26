@@ -1690,10 +1690,10 @@ def save_raw_screening_gifs(
         if jobs > 1 and len(datasets) > 1:
             max_workers = min(jobs, len(datasets), os.cpu_count() or jobs)
             LOGGER.info(
-                "Running raw GIF screening frame generation with %d thread workers to avoid process transfer overhead",
+                "Running raw GIF screening frame generation with %d process workers",
                 max_workers,
             )
-            executor = ThreadPoolExecutor(max_workers=max_workers)
+            executor = ProcessPoolExecutor(max_workers=max_workers)
             try:
                 future_to_sequence = {}
                 next_submit_index = 0
