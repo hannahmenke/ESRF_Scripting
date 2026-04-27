@@ -1409,7 +1409,7 @@ def annotate_frame(image: np.ndarray, text: str) -> np.ndarray:
         pil_image = Image.fromarray(image, mode="L").convert("RGB")
     else:
         pil_image = Image.fromarray(image, mode="RGB")
-    draw = ImageDraw.Draw(pil_image, "RGBA")
+    draw = ImageDraw.Draw(pil_image)
     font = annotation_font_for_image(image)
     left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
     padding = max(6, max((right - left), (bottom - top)) // 10)
@@ -1419,8 +1419,16 @@ def annotate_frame(image: np.ndarray, text: str) -> np.ndarray:
         8 + (right - left) + 2 * padding,
         8 + (bottom - top) + 2 * padding,
     )
-    draw.rectangle(box, fill=(0, 0, 0, 160))
-    draw.text((8 + padding, 8 + padding), text, fill=(255, 255, 255, 255), font=font)
+    draw.rounded_rectangle(box, radius=max(4, padding // 2), fill=(0, 0, 0), outline=(255, 255, 255), width=2)
+    stroke_width = max(1, padding // 4)
+    draw.text(
+        (8 + padding, 8 + padding),
+        text,
+        fill=(255, 255, 0),
+        font=font,
+        stroke_width=stroke_width,
+        stroke_fill=(0, 0, 0),
+    )
     return np.asarray(pil_image)
 
 
