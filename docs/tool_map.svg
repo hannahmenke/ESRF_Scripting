@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 560" width="1200" height="560" role="img" aria-labelledby="title desc">
+  <title id="title">ESRF Scripting Tool Map</title>
+  <desc id="desc">A map of the main tool groups in the ESRF_Scripting repository.</desc>
+  <defs>
+    <style>
+      .title { font: 700 28px 'Helvetica Neue', Arial, sans-serif; fill: #13293d; }
+      .group { font: 700 20px 'Helvetica Neue', Arial, sans-serif; fill: #13293d; }
+      .item { font: 400 15px 'Helvetica Neue', Arial, sans-serif; fill: #274c5e; }
+      .card { stroke: #35586a; stroke-width: 2; rx: 18; ry: 18; }
+    </style>
+  </defs>
+
+  <rect width="1200" height="560" fill="#f8fafc"/>
+  <text x="56" y="46" class="title">Repository tool map</text>
+
+  <rect x="52" y="84" width="250" height="180" class="card" fill="#dbeafe"/>
+  <text x="76" y="118" class="group">Acquisition macros</text>
+  <text x="76" y="152" class="item">id19macros_improved.py</text>
+  <text x="76" y="176" class="item">Beamline-specific BLISS helpers</text>
+  <text x="76" y="200" class="item">Repeated tomography acquisition</text>
+
+  <rect x="332" y="84" width="250" height="180" class="card" fill="#dcfce7"/>
+  <text x="356" y="118" class="group">Projection inspection</text>
+  <text x="356" y="152" class="item">live_tomo_diff.py</text>
+  <text x="356" y="176" class="item">Live projection differences</text>
+  <text x="356" y="200" class="item">History slider and autoplay</text>
+
+  <rect x="612" y="84" width="250" height="180" class="card" fill="#fef3c7"/>
+  <text x="636" y="118" class="group">Reconstruction viewing</text>
+  <text x="636" y="152" class="item">view_recon_slices.py</text>
+  <text x="636" y="176" class="item">live_view_recon_slices_nx.py</text>
+  <text x="636" y="200" class="item">Static and live slice inspection</text>
+
+  <rect x="892" y="84" width="250" height="180" class="card" fill="#fde2e4"/>
+  <text x="916" y="118" class="group">Compression</text>
+  <text x="916" y="152" class="item">compress_recon_volume.py</text>
+  <text x="916" y="176" class="item">Crop, downsample, rescale,</text>
+  <text x="916" y="200" class="item">and write compact HDF5 copies</text>
+
+  <rect x="260" y="314" width="680" height="186" class="card" fill="#ede9fe"/>
+  <text x="286" y="350" class="group">Event tracking and screening</text>
+  <text x="286" y="386" class="item">track_recon_events_nx.py</text>
+  <text x="286" y="414" class="item">Raw GIF screening of full timeseries</text>
+  <text x="286" y="438" class="item">Preview threshold tuning on one comparison</text>
+  <text x="286" y="462" class="item">Full stepwise event detection with SQLite, CSV, and optional diff GIFs</text>
+</svg>

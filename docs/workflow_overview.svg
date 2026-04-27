@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 320" width="1200" height="320" role="img" aria-labelledby="title desc">
+  <title id="title">ESRF Scripting Workflow Overview</title>
+  <desc id="desc">A high-level workflow from acquisition to reconstruction event tracking.</desc>
+  <defs>
+    <style>
+      .title { font: 700 28px 'Helvetica Neue', Arial, sans-serif; fill: #13293d; }
+      .label { font: 700 18px 'Helvetica Neue', Arial, sans-serif; fill: #13293d; }
+      .body { font: 400 14px 'Helvetica Neue', Arial, sans-serif; fill: #274c5e; }
+      .box { stroke: #274c5e; stroke-width: 2; rx: 18; ry: 18; }
+      .arrow { stroke: #5b7c8d; stroke-width: 4; fill: none; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#5b7c8d"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="320" fill="#f5f8fb"/>
+  <text x="56" y="46" class="title">Typical ESRF tomography workflow</text>
+
+  <rect x="52" y="88" width="180" height="144" class="box" fill="#dbeafe"/>
+  <text x="74" y="122" class="label">1. Acquire</text>
+  <text x="74" y="150" class="body">Run tomography series</text>
+  <text x="74" y="171" class="body">with ID19 BLISS macros.</text>
+  <text x="74" y="203" class="body">Main file:</text>
+  <text x="74" y="224" class="body">id19macros_improved.py</text>
+
+  <rect x="276" y="88" width="180" height="144" class="box" fill="#dcfce7"/>
+  <text x="298" y="122" class="label">2. Inspect</text>
+  <text x="298" y="150" class="body">Check projections or</text>
+  <text x="298" y="171" class="body">reconstructed slices.</text>
+  <text x="298" y="203" class="body">Use live or static viewers.</text>
+
+  <rect x="500" y="88" width="180" height="144" class="box" fill="#fef3c7"/>
+  <text x="522" y="122" class="label">3. Screen</text>
+  <text x="522" y="150" class="body">Generate raw GIFs to</text>
+  <text x="522" y="171" class="body">spot bad scans quickly.</text>
+  <text x="522" y="203" class="body">Note scan numbers to skip.</text>
+
+  <rect x="724" y="88" width="180" height="144" class="box" fill="#fde2e4"/>
+  <text x="746" y="122" class="label">4. Tune</text>
+  <text x="746" y="150" class="body">Preview a middle step</text>
+  <text x="746" y="171" class="body">to set thresholds and</text>
+  <text x="746" y="192" class="body">event-size parameters.</text>
+
+  <rect x="948" y="88" width="200" height="144" class="box" fill="#ede9fe"/>
+  <text x="970" y="122" class="label">5. Track</text>
+  <text x="970" y="150" class="body">Run full event detection,</text>
+  <text x="970" y="171" class="body">write SQLite/CSV outputs,</text>
+  <text x="970" y="192" class="body">and optionally diff GIFs.</text>
+
+  <path d="M232 160 H268" class="arrow"/>
+  <path d="M456 160 H492" class="arrow"/>
+  <path d="M680 160 H716" class="arrow"/>
+  <path d="M904 160 H940" class="arrow"/>
+</svg>

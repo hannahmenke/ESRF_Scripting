@@ -12,7 +12,11 @@ This repository is a mix of:
 
 Most scripts are standalone command-line tools with their own focused README.
 
+![Workflow overview](./docs/workflow_overview.svg)
+
 ## Repository Layout
+
+![Repository tool map](./docs/tool_map.svg)
 
 ### Acquisition macros
 
