@@ -46,6 +46,11 @@ def parse_args() -> argparse.Namespace:
         help="Last sequence number to include when compressing a numbered series. Default uses the last discovered member.",
     )
     parser.add_argument(
+        "--skip-scans",
+        default=None,
+        help="Comma-separated scan sequence numbers or ranges to exclude, for example 12,15,20-24.",
+    )
+    parser.add_argument(
         "--output-dir",
         default=None,
         help="Directory where compressed output files will be written.",
@@ -356,6 +361,27 @@ def select_series_reconstructions(
     if low > high:
         low, high = high, low
     return [item for item in all_reconstructions if low <= item[0] <= high]
+
+
+def parse_skip_scan_numbers(raw_value: str | None) -> set[int]:
+    if raw_value is None or not raw_value.strip():
+        return set()
+
+    skipped: set[int] = set()
+    for raw_part in raw_value.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_text, stop_text = part.split("-", 1)
+            start = int(start_text.strip())
+            stop = int(stop_text.strip())
+            low = min(start, stop)
+            high = max(start, stop)
+            skipped.update(range(low, high + 1))
+            continue
+        skipped.add(int(part))
+    return skipped
 
 
 def parse_crop_range(raw_range: str | None, size: int, axis_name: str) -> tuple[int, int]:
@@ -890,6 +916,11 @@ def compress_reconstruction_task(
 def main() -> int:
     args = parse_args()
     configure_logging(args.log_level)
+    try:
+        skipped_scans = parse_skip_scan_numbers(args.skip_scans)
+    except ValueError as exc:
+        LOGGER.error("--skip-scans is invalid: %s", exc)
+        return 1
 
     input_path = Path(args.input_path).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir is not None else None
@@ -927,6 +958,17 @@ def main() -> int:
         if not all_reconstructions:
             raise RuntimeError(f"No reconstruction series members found for {reference_dataset_root}")
 
+        if skipped_scans:
+            filtered_reconstructions = []
+            for sequence_number, dataset_root, recon_file in all_reconstructions:
+                if sequence_number in skipped_scans:
+                    LOGGER.info("Skipping excluded series member #%04d: dataset=%s", sequence_number, dataset_root)
+                    continue
+                filtered_reconstructions.append((sequence_number, dataset_root, recon_file))
+            all_reconstructions = filtered_reconstructions
+        if not all_reconstructions:
+            raise RuntimeError("No reconstruction series members remain after applying --skip-scans")
+
         for sequence_number, dataset_root, recon_file in all_reconstructions:
             LOGGER.info(
                 "Admitted series member #%04d: dataset=%s | recon=%s",
@@ -954,6 +996,11 @@ def main() -> int:
 
         LOGGER.info("Series anchor dataset: %s", reference_dataset_root)
         LOGGER.info("Series anchor reconstruction: %s", reference_recon_file)
+        if skipped_scans:
+            LOGGER.info(
+                "Excluded scans: %s",
+                ", ".join(f"#{sequence_number:04d}" for sequence_number in sorted(skipped_scans)),
+            )
         LOGGER.info(
             "Processing sequence order: %s",
             ", ".join(f"#{sequence_number:04d}" for sequence_number, *_rest in selected_reconstructions),

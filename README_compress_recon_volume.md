@@ -63,6 +63,16 @@ python3 compress_recon_volume.py 0_39/039_Estaillades_WW_Drainage_first_position
   --stop-number 20
 ```
 
+Exclude known bad scans from a series:
+
+```bash
+python3 compress_recon_volume.py 0_39/039_Estaillades_WW_Drainage_first_position \
+  --output-dir /path/to/output_directory \
+  --start-number 2 \
+  --stop-number 20 \
+  --skip-scans 7,12,15-17
+```
+
 ## Preview Mode
 
 Preview mode shows orthogonal slices of the transformed output-space volume before writing files.
